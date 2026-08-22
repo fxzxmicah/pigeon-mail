@@ -8,6 +8,10 @@ pub fn parse(uri: &str) -> anyhow::Result<MailtoRequest> {
         .split_once(':')
         .ok_or_else(|| anyhow::anyhow!("URI has no scheme"))?;
     anyhow::ensure!(scheme.eq_ignore_ascii_case("mailto"), "URI is not mailto");
+    anyhow::ensure!(
+        !remainder.starts_with("//"),
+        "mailto URI cannot contain an authority"
+    );
     let remainder = remainder
         .split_once('#')
         .map_or(remainder, |(value, _)| value);
@@ -101,6 +105,12 @@ mod tests {
     #[test]
     fn empty_mailto_opens_a_blank_composer() {
         assert_eq!(parse("mailto:").unwrap(), Default::default());
+    }
+
+    #[test]
+    fn rejects_hierarchical_mailto_uris() {
+        assert!(parse("mailto://person@example.test").is_err());
+        assert!(parse("mailto:///person@example.test").is_err());
     }
 
     #[test]

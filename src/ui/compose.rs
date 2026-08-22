@@ -75,14 +75,13 @@ impl ComposeViewModel {
     }
 
     pub fn for_mailto(mailbox: &MailboxViewModel, request: &MailtoRequest) -> Option<Self> {
-        mailbox.current_eds_binding()?;
         let account = mailbox.current_account()?;
         let identity = account.default_identity()?;
         Some(Self {
             kind: ComposeKind::New,
             draft: DraftBuilder::new().create_mailto_draft(account.id.clone(), identity, request),
             available_identities: account.aliases.clone(),
-            initially_dirty: mailto_has_content(request),
+            initially_dirty: !request.is_empty(),
         })
     }
 
@@ -125,14 +124,6 @@ impl ComposeViewModel {
             ComposeKind::Forward => "Forward draft saved",
         }
     }
-}
-
-fn mailto_has_content(request: &MailtoRequest) -> bool {
-    !request.to.is_empty()
-        || !request.cc.is_empty()
-        || !request.bcc.is_empty()
-        || !request.subject.is_empty()
-        || !request.body.is_empty()
 }
 
 #[derive(Clone)]
@@ -1414,40 +1405,44 @@ fn rebuild_attachment_list(list: &gtk::ListBox, attachments: &[AttachmentInfo]) 
 #[cfg(test)]
 mod tests {
     use super::{
-        attachment_heading, has_optional_recipients, mailto_has_content, rebind_draft_account,
+        ComposeViewModel, attachment_heading, has_optional_recipients, rebind_draft_account,
         replace_signature_content, replace_signature_content_with_separator,
     };
+    use crate::integration::backend::stub_backend;
+    use crate::integration::stub::stub_account;
     use crate::integration::webkit::ComposerContent;
     use crate::model::account::{AliasId, MailAccountId, SendingIdentity};
-    use crate::model::mail::{AttachmentInfo, ConversationId, MailtoRequest, MessageId};
+    use crate::model::event::AccountMailboxSnapshot;
+    use crate::model::mail::{
+        AttachmentInfo, ConversationId, MailboxMode, MailtoRequest, MessageId,
+    };
+    use crate::model::settings::AppSettings;
+    use crate::ui::mailbox::MailboxViewModel;
 
     #[test]
-    fn only_an_entirely_empty_mailto_is_clean() {
-        assert!(!mailto_has_content(&MailtoRequest::default()));
-        for request in [
-            MailtoRequest {
-                to: vec!["to@example.test".into()],
-                ..Default::default()
+    fn stub_mailto_uses_the_visible_stub_identity_without_an_eds_binding() {
+        let mailbox = MailboxViewModel::from_snapshot(
+            vec![stub_account()],
+            AppSettings::default(),
+            stub_backend(),
+            AccountMailboxSnapshot {
+                mode: MailboxMode::StubNoAccount,
+                folders: Vec::new(),
+                conversations: Vec::new(),
             },
-            MailtoRequest {
-                cc: vec!["cc@example.test".into()],
-                ..Default::default()
-            },
-            MailtoRequest {
-                bcc: vec!["bcc@example.test".into()],
-                ..Default::default()
-            },
-            MailtoRequest {
-                subject: "Subject".into(),
-                ..Default::default()
-            },
-            MailtoRequest {
-                body: "Body".into(),
-                ..Default::default()
-            },
-        ] {
-            assert!(mailto_has_content(&request));
-        }
+        );
+        let request = MailtoRequest {
+            to: vec!["recipient@example.test".into()],
+            subject: "Stub compose".into(),
+            ..Default::default()
+        };
+
+        let model = ComposeViewModel::for_mailto(&mailbox, &request).unwrap();
+
+        assert_eq!(model.draft.account_id.0, "local-stub");
+        assert_eq!(model.draft.to, ["recipient@example.test"]);
+        assert_eq!(model.draft.subject, "Stub compose");
+        assert!(model.initially_dirty);
     }
 
     #[test]

@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 
 use crate::app::accounts::AccountRuntime;
 use crate::integration::backend::stub_backend;
+use crate::model::mail::MailtoRequest;
 use crate::ui::mailbox::{MailboxViewModel, MainWindow};
 
 struct RegistryChanges {
@@ -26,75 +27,111 @@ impl RegistryChanges {
     }
 }
 
-pub struct Application {
-    inner: adw::Application,
+struct ApplicationSession {
+    runtime: AccountRuntime,
+    window: RefCell<Option<MainWindow>>,
 }
 
-impl Application {
-    pub fn new() -> Self {
-        let inner = adw::Application::builder()
-            .application_id(crate::config::APP_ID)
-            .flags(gio::ApplicationFlags::HANDLES_OPEN)
-            .build();
-        inner.set_accels_for_action("win.compose", &["<Primary>n"]);
-        inner.set_accels_for_action("win.preferences", &["<Primary>comma"]);
-        inner.set_accels_for_action("win.back", &["<Alt>Left"]);
-        let runtime = Rc::new(AccountRuntime::new());
-        let window = Rc::new(RefCell::new(None::<MainWindow>));
-
-        inner.connect_startup(|_| {
-            load_app_css();
-        });
-
-        let window_for_activate = Rc::clone(&window);
-        let runtime_for_activate = Rc::clone(&runtime);
-        inner.connect_activate(move |app| {
-            let window =
-                ensure_main_window(app, &window_for_activate, runtime_for_activate.as_ref());
-            window.present();
-        });
-
-        let window_for_open = Rc::clone(&window);
-        let runtime_for_open = Rc::clone(&runtime);
-        inner.connect_open(move |app, files, _hint| {
-            let window = ensure_main_window(app, &window_for_open, runtime_for_open.as_ref());
-            window.present();
-            for file in files {
-                match crate::app::mailto::parse(file.uri().as_str()) {
-                    Ok(request) => {
-                        if !window.open_mailto(request) {
-                            tracing::warn!(
-                                "mailto request could not be opened without a sending identity"
-                            );
-                        }
-                    }
-                    Err(error) => crate::logging::report_failure("mailto-open", &error),
-                }
-            }
-        });
-
-        let runtime_for_shutdown = Rc::clone(&runtime);
-        let window_for_shutdown = Rc::clone(&window);
-        inner.connect_shutdown(move |_| {
-            if let Some(window) = window_for_shutdown.borrow().as_ref() {
-                let mailbox = window.mailbox();
-                if !mailbox.is_bootstrap_placeholder() {
-                    runtime_for_shutdown.save_mailbox(&mailbox);
-                }
-            }
-        });
-
-        Self { inner }
+impl ApplicationSession {
+    fn new() -> Self {
+        Self {
+            runtime: AccountRuntime::new(),
+            window: RefCell::new(None),
+        }
     }
 
-    pub fn run(self) -> glib::ExitCode {
-        self.inner.run()
+    fn present(&self, app: &adw::Application) -> MainWindow {
+        let window = ensure_main_window(app, &self.window, &self.runtime);
+        window.present();
+        window
     }
+
+    fn compose(&self, app: &adw::Application, request: MailtoRequest) {
+        self.present(app).open_mailto(request);
+    }
+
+    fn save(&self) {
+        if let Some(window) = self.window.borrow().as_ref() {
+            let mailbox = window.mailbox();
+            if !mailbox.is_bootstrap_placeholder() {
+                self.runtime.save_mailbox(&mailbox);
+            }
+        }
+    }
+}
+
+pub fn run() -> glib::ExitCode {
+    build_application().run()
+}
+
+fn build_application() -> adw::Application {
+    let app = adw::Application::builder()
+        .application_id(crate::config::APP_ID)
+        .flags(gio::ApplicationFlags::HANDLES_OPEN)
+        .build();
+    app.set_accels_for_action("win.compose", &["<Primary>n"]);
+    app.set_accels_for_action("win.preferences", &["<Primary>comma"]);
+    app.set_accels_for_action("win.back", &["<Alt>Left"]);
+    let session = Rc::new(ApplicationSession::new());
+
+    let app_for_compose = app.downgrade();
+    let session_for_compose = Rc::clone(&session);
+    let compose_action = gio::SimpleAction::new("compose", None);
+    compose_action.connect_activate(move |_, _| {
+        if let Some(app) = app_for_compose.upgrade() {
+            session_for_compose.compose(&app, Default::default());
+        }
+    });
+    app.add_action(&compose_action);
+
+    app.connect_startup(|_| {
+        load_app_css();
+    });
+
+    let session_for_activate = Rc::clone(&session);
+    app.connect_activate(move |app| {
+        session_for_activate.present(app);
+    });
+
+    let session_for_open = Rc::clone(&session);
+    app.connect_open(move |app, files, _hint| {
+        let mut opened = false;
+        for file in files {
+            match parse_mailto_open_uri(file.uri().as_str()) {
+                Ok(request) => {
+                    session_for_open.compose(app, request);
+                    opened = true;
+                }
+                Err(error) => crate::logging::report_invalid_input("mailto-open", &error),
+            }
+        }
+        if !opened {
+            session_for_open.present(app);
+        }
+    });
+
+    let session_for_shutdown = session;
+    app.connect_shutdown(move |_| {
+        session_for_shutdown.save();
+    });
+
+    app
+}
+
+fn parse_mailto_open_uri(uri: &str) -> anyhow::Result<MailtoRequest> {
+    // GApplication exposes Open requests as GFiles, which render an opaque
+    // `mailto:recipient` URI as `mailto:///recipient`.
+    let canonical = uri
+        .split_once(':')
+        .filter(|(scheme, _)| scheme.eq_ignore_ascii_case("mailto"))
+        .and_then(|(_, remainder)| remainder.strip_prefix("///"))
+        .map(|recipient| format!("mailto:{recipient}"));
+    crate::app::mailto::parse(canonical.as_deref().unwrap_or(uri))
 }
 
 fn ensure_main_window(
     app: &adw::Application,
-    slot: &Rc<RefCell<Option<MainWindow>>>,
+    slot: &RefCell<Option<MainWindow>>,
     runtime: &AccountRuntime,
 ) -> MainWindow {
     if let Some(window) = slot.borrow().as_ref() {
@@ -113,9 +150,8 @@ fn ensure_main_window(
     });
     let window_for_bootstrap = window.clone();
     let runtime_for_registry = AccountRuntime::clone(runtime);
-    glib::timeout_add_local(
-        std::time::Duration::from_millis(50),
-        move || match receiver.try_recv() {
+    glib::timeout_add_local(Duration::from_millis(50), move || {
+        match receiver.try_recv() {
             Ok(mailbox) => {
                 window_for_bootstrap.replace_mailbox(mailbox);
                 watch_account_registry(
@@ -149,8 +185,8 @@ fn ensure_main_window(
                 );
                 glib::ControlFlow::Break
             }
-        },
-    );
+        }
+    });
 
     window
 }
@@ -255,5 +291,32 @@ fn load_app_css() {
         #[cfg(debug_assertions)]
         gtk::IconTheme::for_display(&display)
             .add_search_path(concat!(env!("CARGO_MANIFEST_DIR"), "/data/icons"));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_mailto_open_uri;
+
+    #[test]
+    fn accepts_standard_and_gfile_mailto_uris() {
+        let standard = parse_mailto_open_uri("mailto:person@example.test").unwrap();
+        let transported =
+            parse_mailto_open_uri("MAILTO:///person@example.test?subject=Hello").unwrap();
+
+        assert_eq!(standard.to, ["person@example.test"]);
+        assert_eq!(transported.to, ["person@example.test"]);
+        assert_eq!(transported.subject, "Hello");
+        assert_eq!(
+            parse_mailto_open_uri("mailto:///").unwrap(),
+            Default::default()
+        );
+    }
+
+    #[test]
+    fn rejects_other_schemes_and_transported_hierarchical_mailto_uris() {
+        assert!(parse_mailto_open_uri("https:///example.test").is_err());
+        assert!(parse_mailto_open_uri("mailto://////person@example.test").is_err());
+        assert!(parse_mailto_open_uri("mailto://///person@example.test/").is_err());
     }
 }

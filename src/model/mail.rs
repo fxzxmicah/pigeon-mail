@@ -186,6 +186,16 @@ pub struct MailtoRequest {
     pub body: String,
 }
 
+impl MailtoRequest {
+    pub fn is_empty(&self) -> bool {
+        self.to.is_empty()
+            && self.cc.is_empty()
+            && self.bcc.is_empty()
+            && self.subject.is_empty()
+            && self.body.is_empty()
+    }
+}
+
 impl DraftMessage {
     pub fn empty(account_id: MailAccountId, alias_id: AliasId) -> Self {
         Self {
@@ -208,7 +218,36 @@ impl DraftMessage {
 
 #[cfg(test)]
 mod tests {
-    use super::{MessageBody, plain_text_to_html};
+    use super::{MailtoRequest, MessageBody, plain_text_to_html};
+
+    #[test]
+    fn mailto_is_empty_only_when_every_field_is_empty() {
+        assert!(MailtoRequest::default().is_empty());
+        for request in [
+            MailtoRequest {
+                to: vec!["to@example.test".into()],
+                ..Default::default()
+            },
+            MailtoRequest {
+                cc: vec!["cc@example.test".into()],
+                ..Default::default()
+            },
+            MailtoRequest {
+                bcc: vec!["bcc@example.test".into()],
+                ..Default::default()
+            },
+            MailtoRequest {
+                subject: "Subject".into(),
+                ..Default::default()
+            },
+            MailtoRequest {
+                body: "Body".into(),
+                ..Default::default()
+            },
+        ] {
+            assert!(!request.is_empty());
+        }
+    }
 
     #[test]
     fn plain_text_html_conversion_escapes_content_and_normalizes_line_endings() {

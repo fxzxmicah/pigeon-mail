@@ -1,5 +1,5 @@
 Name:           pigeon-mail
-Version:        0.1.0
+Version:        0.1.1
 Release:        1%{?dist}
 Summary:        GNOME email client using Evolution Data Server
 URL:            https://github.com/fxzxmicah/pigeon-mail
@@ -12,12 +12,9 @@ BuildRequires:  rust-packaging
 BuildRequires:  gcc
 BuildRequires:  desktop-file-utils
 BuildRequires:  appstream
-BuildRequires:  glib2-devel
+BuildRequires:  glib2
 BuildRequires:  pkgconfig(camel-1.2)
-BuildRequires:  pkgconfig(gtk4)
-BuildRequires:  pkgconfig(libadwaita-1)
 BuildRequires:  pkgconfig(libedataserver-1.2)
-BuildRequires:  pkgconfig(webkitgtk-6.0)
 
 Requires:       gnome-online-accounts
 Recommends:     evolution-ews-core
@@ -78,5 +75,9 @@ glib-compile-schemas --strict --dry-run %{buildroot}%{_datadir}/glib-2.0/schemas
 %{_datadir}/icons/hicolor/scalable/apps/org.gnome.pigeon.svg
 
 %changelog
+* Sun Aug 23 2026 Fxzx micah <48860358+fxzxmicah@users.noreply.github.com> - 0.1.1-1
+- Fix desktop Compose activation and mailto URI handling
+- Keep Compose and mailto available in stub sessions
+
 * Sun Aug 23 2026 Fxzx micah <48860358+fxzxmicah@users.noreply.github.com> - 0.1.0-1
 - Initial Pigeon Mail package

@@ -683,21 +683,17 @@ impl MainWindow {
         self.mailbox.borrow()
     }
 
-    pub fn open_mailto(&self, request: MailtoRequest) -> bool {
+    pub fn open_mailto(&self, request: MailtoRequest) {
         if self.mailbox.borrow().is_loading() {
             self.pending_mailto.borrow_mut().push(request);
-            return true;
+            return;
         }
-        self.present_mailto(request)
-    }
-
-    fn present_mailto(&self, request: MailtoRequest) -> bool {
         present_mailto_request(
             &self.mailbox,
             &self.compose_page,
             &self.toast_overlay,
             request,
-        )
+        );
     }
 
     fn present_pending_mailto(&self) {
@@ -718,9 +714,7 @@ fn drain_pending_mailto(
 ) {
     let requests = std::mem::take(&mut *pending.borrow_mut());
     for request in requests {
-        if !present_mailto_request(mailbox, compose_page, toast_overlay, request) {
-            tracing::warn!("mailto request could not be opened without a sending identity");
-        }
+        present_mailto_request(mailbox, compose_page, toast_overlay, request);
     }
 }
 
@@ -729,13 +723,13 @@ fn present_mailto_request(
     compose_page: &ComposePage,
     toast_overlay: &adw::ToastOverlay,
     request: MailtoRequest,
-) -> bool {
+) {
     let Some(model) = ComposeViewModel::for_mailto(&mailbox.borrow(), &request) else {
         toast_overlay.add_toast(adw::Toast::new("Mail link unavailable."));
-        return false;
+        tracing::warn!("mailto request could not be opened without a sending identity");
+        return;
     };
     compose_page.request_open(model);
-    true
 }
 
 fn queue_current_account_refresh(state: &Rc<RefCell<MailboxViewModel>>, cache: &CacheManager) {

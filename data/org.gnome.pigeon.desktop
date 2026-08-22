@@ -12,8 +12,8 @@ MimeType=x-scheme-handler/mailto;
 StartupNotify=true
 DBusActivatable=true
 X-GNOME-UsesNotifications=true
-Actions=Compose;
+Actions=compose;
 
-[Desktop Action Compose]
+[Desktop Action compose]
 Name=Compose New Message
 Exec=pigeon mailto:

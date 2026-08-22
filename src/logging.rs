@@ -32,6 +32,11 @@ pub fn report_deferred(operation: &'static str, error: &impl std::fmt::Display) 
     report_development_detail(operation, error);
 }
 
+pub fn report_invalid_input(operation: &'static str, error: &impl std::fmt::Display) {
+    tracing::warn!(operation, category = "input", "request rejected");
+    report_development_detail(operation, error);
+}
+
 #[cfg(debug_assertions)]
 fn report_development_detail(operation: &'static str, error: &impl std::fmt::Display) {
     tracing::debug!(target: "pigeon::development", operation, error = %error, "development failure detail");
