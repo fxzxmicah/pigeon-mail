@@ -1,0 +1,30 @@
+[package]
+name = "pigeon-mail"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "A GNOME-native email client built on GNOME Online Accounts and Evolution Data Server."
+repository = "https://github.com/fxzxmicah/pigeon-mail"
+
+[[bin]]
+name = "pigeon"
+path = "src/main.rs"
+
+[dependencies]
+adw = { package = "libadwaita", version = "0.9", features = ["v1_8", "gtk_v4_20"] }
+anyhow = "1.0"
+futures = "0.3"
+gio = "0.22"
+glib = "0.22"
+gtk = { package = "gtk4", version = "0.11", features = ["v4_20"] }
+html2text = { version = "0.17", default-features = false }
+percent-encoding = "2.3"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+webkit = { package = "webkit6", version = "0.6", features = ["v2_50"] }
+
+[build-dependencies]
+cc = "1.1"
+pkg-config = "0.3"

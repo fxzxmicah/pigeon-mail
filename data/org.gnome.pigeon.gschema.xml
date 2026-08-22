@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<schemalist>
+  <schema id="org.gnome.pigeon" path="/org/gnome/pigeon/">
+    <key name="selected-account-id" type="s">
+      <default>''</default>
+      <summary>Last selected account ID</summary>
+      <description>The GOA-backed account selected when the app was last closed.</description>
+    </key>
+    <key name="prefer-html-view" type="b">
+      <default>true</default>
+      <summary>Whether HTML view is preferred</summary>
+      <description>Determines whether messages open in HTML mode when available.</description>
+    </key>
+  </schema>
+</schemalist>

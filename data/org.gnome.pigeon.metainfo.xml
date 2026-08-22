@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>org.gnome.pigeon</id>
+  <name>Pigeon Mail</name>
+  <summary>Read and send email on GNOME</summary>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT</project_license>
+  <developer id="org.gnome.pigeon">
+    <name>Pigeon Mail contributors</name>
+  </developer>
+  <launchable type="desktop-id">org.gnome.pigeon.desktop</launchable>
+  <url type="homepage">https://github.com/fxzxmicah/pigeon-mail</url>
+  <url type="bugtracker">https://github.com/fxzxmicah/pigeon-mail/issues</url>
+  <provides>
+    <binary>pigeon</binary>
+    <mediatype>x-scheme-handler/mailto</mediatype>
+  </provides>
+  <description>
+    <p>
+      Pigeon Mail is a GNOME email client using GNOME Online Accounts and
+      Evolution Data Server for accounts, offline mail storage, and delivery.
+    </p>
+    <p>
+      It supports HTML mail, sending identities, attachments, drafts, search,
+      and cache-first message actions.
+    </p>
+  </description>
+  <categories>
+    <category>Network</category>
+    <category>Email</category>
+  </categories>
+  <content_rating type="oars-1.1"/>
+  <releases>
+    <release version="0.1.0" date="2026-08-23"/>
+  </releases>
+</component>
