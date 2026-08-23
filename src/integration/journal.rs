@@ -13,7 +13,6 @@ const PENDING_MESSAGE_FLAGS_FILE: &str = "pending-message-flags.json";
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct PendingMove {
     pub(crate) account_id: MailAccountId,
-    pub(crate) conversation_id: ConversationId,
     pub(crate) destination_folder_id: FolderId,
     pub(crate) summary: ConversationSummary,
 }
@@ -141,7 +140,7 @@ impl PendingMailActionStore {
     ) -> anyhow::Result<()> {
         self.update(|moves| {
             moves.retain(|pending| {
-                pending.account_id != *account_id || !completed.contains(&pending.conversation_id)
+                pending.account_id != *account_id || !completed.contains(&pending.summary.id)
             });
         })
     }
@@ -153,7 +152,7 @@ impl PendingMailActionStore {
     ) -> anyhow::Result<()> {
         self.update(|moves| {
             moves.retain(|pending| {
-                pending.account_id != *account_id || remote_ids.contains(&pending.conversation_id)
+                pending.account_id != *account_id || remote_ids.contains(&pending.summary.id)
             });
         })
     }
@@ -161,7 +160,7 @@ impl PendingMailActionStore {
     pub(crate) fn apply_move_overlay(
         &self,
         account_id: &MailAccountId,
-        conversations: &mut HashMap<(String, String), Vec<ConversationSummary>>,
+        conversations: &mut HashMap<String, Vec<ConversationSummary>>,
     ) {
         apply_move_overlay(account_id, &self.for_account(account_id), conversations);
     }
@@ -169,7 +168,7 @@ impl PendingMailActionStore {
     pub(crate) fn apply_flag_overlay(
         &self,
         account_id: &MailAccountId,
-        conversations: &mut HashMap<(String, String), Vec<ConversationSummary>>,
+        conversations: &mut HashMap<String, Vec<ConversationSummary>>,
     ) {
         apply_flag_overlay(
             account_id,
@@ -211,17 +210,13 @@ impl PendingMailActionStore {
 fn apply_flag_overlay(
     account_id: &MailAccountId,
     pending: &[PendingMessageFlags],
-    conversations: &mut HashMap<(String, String), Vec<ConversationSummary>>,
+    conversations: &mut HashMap<String, Vec<ConversationSummary>>,
 ) {
-    for ((cached_account_id, _), summaries) in conversations.iter_mut() {
-        if cached_account_id != &account_id.0 {
-            continue;
-        }
+    for summaries in conversations.values_mut() {
         for summary in summaries {
-            let Some(flags) = pending
-                .iter()
-                .find(|flags| flags.conversation_id == summary.id)
-            else {
+            let Some(flags) = pending.iter().find(|flags| {
+                flags.account_id == *account_id && flags.conversation_id == summary.id
+            }) else {
                 continue;
             };
             if let Some(read) = flags.read {
@@ -262,8 +257,7 @@ fn upsert_flags(
 
 fn upsert_move(moves: &mut Vec<PendingMove>, pending: PendingMove) {
     if let Some(existing) = moves.iter_mut().find(|existing| {
-        existing.account_id == pending.account_id
-            && existing.conversation_id == pending.conversation_id
+        existing.account_id == pending.account_id && existing.summary.id == pending.summary.id
     }) {
         *existing = pending;
     } else {
@@ -274,21 +268,16 @@ fn upsert_move(moves: &mut Vec<PendingMove>, pending: PendingMove) {
 fn apply_move_overlay(
     account_id: &MailAccountId,
     pending_moves: &[PendingMove],
-    conversations: &mut HashMap<(String, String), Vec<ConversationSummary>>,
+    conversations: &mut HashMap<String, Vec<ConversationSummary>>,
 ) {
     for pending in pending_moves
         .iter()
         .filter(|pending| pending.account_id == *account_id)
     {
-        for ((cached_account_id, _), summaries) in conversations.iter_mut() {
-            if cached_account_id == &account_id.0 {
-                summaries.retain(|summary| summary.id != pending.conversation_id);
-            }
+        for summaries in conversations.values_mut() {
+            summaries.retain(|summary| summary.id != pending.summary.id);
         }
-        let Some(destination) = conversations.get_mut(&(
-            account_id.0.clone(),
-            pending.destination_folder_id.0.clone(),
-        )) else {
+        let Some(destination) = conversations.get_mut(&pending.destination_folder_id.0) else {
             continue;
         };
         destination.push(pending.summary.clone());
@@ -323,7 +312,6 @@ mod tests {
     fn pending(account: &str, id: &str, destination: &str) -> PendingMove {
         PendingMove {
             account_id: MailAccountId(account.into()),
-            conversation_id: ConversationId(id.into()),
             destination_folder_id: FolderId(destination.into()),
             summary: summary(id, id, 1),
         }
@@ -333,14 +321,8 @@ mod tests {
     fn overlay_moves_one_cached_summary_to_destination() {
         let account = MailAccountId("account-1".into());
         let mut cache = HashMap::from([
-            (
-                (account.0.clone(), "inbox".into()),
-                vec![summary("m1", "one", 1)],
-            ),
-            (
-                (account.0.clone(), "archive".into()),
-                vec![summary("m2", "two", 0)],
-            ),
+            ("inbox".into(), vec![summary("m1", "one", 1)]),
+            ("archive".into(), vec![summary("m2", "two", 0)]),
         ]);
 
         apply_move_overlay(
@@ -349,42 +331,35 @@ mod tests {
             &mut cache,
         );
 
-        assert!(cache[&(account.0.clone(), "inbox".into())].is_empty());
-        let archived = &cache[&(account.0.clone(), "archive".into())];
+        assert!(cache["inbox"].is_empty());
+        let archived = &cache["archive"];
         assert_eq!(archived.len(), 2);
         assert_eq!(archived.iter().filter(|item| item.id.0 == "m1").count(), 1);
     }
 
     #[test]
-    fn overlay_is_idempotent_and_account_scoped() {
+    fn overlay_is_idempotent_and_ignores_other_accounts() {
         let account = MailAccountId("account-1".into());
         let mut cache = HashMap::from([
-            (
-                (account.0.clone(), "inbox".into()),
-                vec![summary("m1", "one", 1)],
-            ),
-            ((account.0.clone(), "archive".into()), Vec::new()),
-            (
-                ("account-2".into(), "inbox".into()),
-                vec![summary("m1", "other", 1)],
-            ),
+            ("inbox".into(), vec![summary("m1", "one", 1)]),
+            ("archive".into(), Vec::new()),
         ]);
-        let moves = [pending("account-1", "m1", "archive")];
+        let moves = [
+            pending("account-1", "m1", "archive"),
+            pending("account-2", "m2", "archive"),
+        ];
 
         apply_move_overlay(&account, &moves, &mut cache);
         apply_move_overlay(&account, &moves, &mut cache);
 
-        assert_eq!(cache[&(account.0.clone(), "archive".into())].len(), 1);
-        assert_eq!(cache[&("account-2".into(), "inbox".into())].len(), 1);
+        assert_eq!(cache["archive"].len(), 1);
+        assert_eq!(cache["archive"][0].id.0, "m1");
     }
 
     #[test]
     fn overlay_does_not_make_an_unloaded_destination_look_complete() {
         let account = MailAccountId("account-1".into());
-        let mut cache = HashMap::from([(
-            (account.0.clone(), "inbox".into()),
-            vec![summary("m1", "one", 1)],
-        )]);
+        let mut cache = HashMap::from([("inbox".into(), vec![summary("m1", "one", 1)])]);
 
         apply_move_overlay(
             &account,
@@ -392,8 +367,8 @@ mod tests {
             &mut cache,
         );
 
-        assert!(cache[&(account.0.clone(), "inbox".into())].is_empty());
-        assert!(!cache.contains_key(&(account.0, "archive".into())));
+        assert!(cache["inbox"].is_empty());
+        assert!(!cache.contains_key("archive"));
     }
 
     #[test]
@@ -412,7 +387,7 @@ mod tests {
         let decoded: Vec<PendingMove> = serde_json::from_str(&encoded).unwrap();
 
         assert_eq!(decoded.len(), 1);
-        assert_eq!(decoded[0].conversation_id.0, "folder\u{1f}uid");
+        assert_eq!(decoded[0].summary.id.0, "folder\u{1f}uid");
         assert_eq!(decoded[0].summary.unread_count, 1);
     }
 
@@ -427,14 +402,14 @@ mod tests {
 
         moves.retain(|pending| {
             pending.account_id != MailAccountId("account-1".into())
-                || remote_ids.contains(&pending.conversation_id)
+                || remote_ids.contains(&pending.summary.id)
         });
 
         assert_eq!(moves.len(), 2);
         assert!(
             moves
                 .iter()
-                .any(|pending| pending.conversation_id.0 == "still-remote")
+                .any(|pending| pending.summary.id.0 == "still-remote")
         );
         assert!(
             moves
@@ -495,28 +470,18 @@ mod tests {
             read: Some(true),
             starred: Some(true),
         };
-        let mut conversations = HashMap::from([
-            (
-                (account.0.clone(), "inbox".into()),
-                vec![summary(&id.0, "one", 1)],
-            ),
-            (
-                ("account-2".into(), "inbox".into()),
-                vec![summary(&id.0, "two", 1)],
-            ),
-        ]);
+        let other = PendingMessageFlags {
+            account_id: MailAccountId("account-2".into()),
+            conversation_id: id.clone(),
+            read: Some(false),
+            starred: Some(false),
+        };
+        let mut conversations = HashMap::from([("inbox".into(), vec![summary(&id.0, "one", 1)])]);
 
-        apply_flag_overlay(&account, &[pending], &mut conversations);
+        apply_flag_overlay(&account, &[other, pending], &mut conversations);
 
-        assert_eq!(
-            conversations[&(account.0, "inbox".into())][0].unread_count,
-            0
-        );
-        assert!(conversations[&("account-1".into(), "inbox".into())][0].starred);
-        assert_eq!(
-            conversations[&("account-2".into(), "inbox".into())][0].unread_count,
-            1
-        );
+        assert_eq!(conversations["inbox"][0].unread_count, 0);
+        assert!(conversations["inbox"][0].starred);
     }
 
     #[test]

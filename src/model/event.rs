@@ -1,6 +1,7 @@
 use crate::model::account::MailAccountId;
 use crate::model::mail::{
     ConversationId, ConversationSummary, FolderId, MailFolder, MailboxMode, MessageDetail,
+    StoredMessageRef,
 };
 
 #[derive(Debug, Clone)]
@@ -26,14 +27,8 @@ pub enum AttachmentDisposition {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MessageAction {
     SetStarred(bool),
-    SetUnread(bool),
+    SetRead(bool),
     MoveTo(FolderId),
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ComposeOperation {
-    SaveDraft,
-    Send,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -106,15 +101,16 @@ pub enum CacheEvent {
         action: MessageAction,
         result: Result<(), String>,
     },
-    ComposeOperationCompleted {
-        operation: ComposeOperation,
-        result: Result<Option<MessageDetail>, String>,
+    DraftSaveCompleted {
+        result: Result<Option<StoredMessageRef>, String>,
+    },
+    SendCompleted {
+        result: Result<(), String>,
     },
     AttachmentPrepared {
         disposition: AttachmentDisposition,
         display_name: String,
-        source_uri: String,
-        result: Result<Option<String>, String>,
+        result: Result<String, String>,
     },
 }
 
@@ -219,13 +215,11 @@ impl CacheEvent {
     pub fn attachment_prepared(
         disposition: AttachmentDisposition,
         display_name: String,
-        source_uri: String,
-        result: Result<Option<String>, String>,
+        result: Result<String, String>,
     ) -> Self {
         Self::AttachmentPrepared {
             disposition,
             display_name,
-            source_uri,
             result,
         }
     }
@@ -244,11 +238,12 @@ impl CacheEvent {
         }
     }
 
-    pub fn compose_operation(
-        operation: ComposeOperation,
-        result: Result<Option<MessageDetail>, String>,
-    ) -> Self {
-        Self::ComposeOperationCompleted { operation, result }
+    pub fn draft_saved(result: Result<Option<StoredMessageRef>, String>) -> Self {
+        Self::DraftSaveCompleted { result }
+    }
+
+    pub fn send_completed(result: Result<(), String>) -> Self {
+        Self::SendCompleted { result }
     }
 }
 
@@ -402,38 +397,36 @@ mod tests {
             CacheEvent::message_action(
                 MailAccountId("account-1".into()),
                 ConversationId("conversation-1".into()),
-                MessageAction::SetUnread(false),
+                MessageAction::SetRead(true),
                 Ok(()),
             ),
             CacheEvent::MessageActionCompleted {
-                action: MessageAction::SetUnread(false),
+                action: MessageAction::SetRead(true),
                 result: Ok(()),
                 ..
             }
         ));
         assert!(matches!(
-            CacheEvent::compose_operation(
-                ComposeOperation::SaveDraft,
-                Err("Draft not saved.".into()),
-            ),
-            CacheEvent::ComposeOperationCompleted {
-                operation: ComposeOperation::SaveDraft,
-                result: Err(error),
-            } if error == "Draft not saved."
+            CacheEvent::draft_saved(Err("Draft not saved.".into())),
+            CacheEvent::DraftSaveCompleted { result: Err(error) }
+                if error == "Draft not saved."
+        ));
+        assert!(matches!(
+            CacheEvent::send_completed(Err("Message not sent.".into())),
+            CacheEvent::SendCompleted { result: Err(error) }
+                if error == "Message not sent."
         ));
         assert!(matches!(
             CacheEvent::attachment_prepared(
                 AttachmentDisposition::SaveAs,
                 "report.pdf".into(),
-                "file:///tmp/report.pdf".into(),
-                Ok(None),
+                Ok("file:///tmp/report.pdf".into()),
             ),
             CacheEvent::AttachmentPrepared {
                 disposition: AttachmentDisposition::SaveAs,
                 display_name,
-                source_uri,
-                result: Ok(None),
-            } if display_name == "report.pdf" && source_uri == "file:///tmp/report.pdf"
+                result: Ok(uri),
+            } if display_name == "report.pdf" && uri == "file:///tmp/report.pdf"
         ));
     }
 }

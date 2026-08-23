@@ -5,11 +5,10 @@ use std::collections::VecDeque;
 use std::rc::Rc;
 
 use crate::core::cache::CacheManager;
-use crate::core::draft::DraftBuilder;
+use crate::core::draft;
 use crate::integration::webkit::{ComposerContent, WebKitComposer};
-use crate::model::account::SendingIdentity;
-use crate::model::address::split_mailbox_list;
-use crate::model::event::ComposeOperation;
+use crate::model::account::{AliasId, SendingIdentity};
+use crate::model::address::{normalized_mailbox_address, split_mailbox_list};
 use crate::model::mail::{AttachmentInfo, DraftMessage, MailtoRequest};
 
 use super::mailbox::MailboxViewModel;
@@ -26,11 +25,34 @@ pub enum ComposeKind {
     Forward,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ComposeOperation {
+    SaveDraft,
+    Send,
+}
+
+impl ComposeOperation {
+    fn progress_status(self) -> &'static str {
+        match self {
+            Self::SaveDraft => "Saving…",
+            Self::Send => "Sending…",
+        }
+    }
+
+    fn failure_status(self) -> &'static str {
+        match self {
+            Self::SaveDraft => "Not saved",
+            Self::Send => "Not sent",
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct ComposeViewModel {
     pub kind: ComposeKind,
     pub draft: DraftMessage,
     pub available_identities: Vec<SendingIdentity>,
+    selected_alias_id: AliasId,
     pub initially_dirty: bool,
 }
 
@@ -40,26 +62,32 @@ impl ComposeViewModel {
             return None;
         }
         let account = mailbox.current_account()?;
-        let identity = account.default_identity()?;
-        let builder = DraftBuilder::new();
+        let message = mailbox.message_detail.as_ref();
+        let identity = if kind == ComposeKind::EditDraft {
+            message
+                .and_then(|message| identity_for_from(&account.aliases, &message.from))
+                .or_else(|| account.default_identity())?
+        } else {
+            account.default_identity()?
+        };
         let draft = match kind {
-            ComposeKind::New => builder.create_draft(account.id.clone(), identity),
-            ComposeKind::EditDraft => builder.create_edit_draft(
+            ComposeKind::New => draft::create_draft(account.id.clone(), identity),
+            ComposeKind::EditDraft => draft::create_edit_draft(
                 account.id.clone(),
                 identity,
                 mailbox.message_detail.as_ref()?,
             ),
-            ComposeKind::Reply => builder.create_reply_draft(
+            ComposeKind::Reply => draft::create_reply_draft(
                 account.id.clone(),
                 identity,
                 mailbox.message_detail.as_ref()?,
             ),
-            ComposeKind::ReplyAll => builder.create_reply_all_draft(
+            ComposeKind::ReplyAll => draft::create_reply_all_draft(
                 account.id.clone(),
                 identity,
                 mailbox.message_detail.as_ref()?,
             ),
-            ComposeKind::Forward => builder.create_forward_draft(
+            ComposeKind::Forward => draft::create_forward_draft(
                 account.id.clone(),
                 identity,
                 mailbox.message_detail.as_ref()?,
@@ -70,6 +98,7 @@ impl ComposeViewModel {
             kind,
             draft,
             available_identities: account.aliases.clone(),
+            selected_alias_id: identity.id.clone(),
             initially_dirty: false,
         })
     }
@@ -79,8 +108,9 @@ impl ComposeViewModel {
         let identity = account.default_identity()?;
         Some(Self {
             kind: ComposeKind::New,
-            draft: DraftBuilder::new().create_mailto_draft(account.id.clone(), identity, request),
+            draft: draft::create_mailto_draft(account.id.clone(), identity, request),
             available_identities: account.aliases.clone(),
+            selected_alias_id: identity.id.clone(),
             initially_dirty: !request.is_empty(),
         })
     }
@@ -88,7 +118,7 @@ impl ComposeViewModel {
     pub fn selected_identity_index(&self) -> u32 {
         self.available_identities
             .iter()
-            .position(|identity| identity.id == self.draft.alias_id)
+            .position(|identity| identity.id == self.selected_alias_id)
             .unwrap_or(0) as u32
     }
 
@@ -489,25 +519,6 @@ impl ComposePage {
         }
         self.sync_editor_content();
         self.set_busy(false);
-        if !self.write_available() {
-            self.inner.title.set_subtitle("Account unavailable");
-        }
-    }
-
-    pub fn finish_operation(
-        &self,
-        operation: ComposeOperation,
-        result: Result<Option<crate::model::mail::MessageDetail>, String>,
-    ) {
-        assert_eq!(
-            self.inner.active_operation.get(),
-            Some(operation),
-            "compose completion does not match the active operation"
-        );
-        match operation {
-            ComposeOperation::SaveDraft => self.finish_save(result),
-            ComposeOperation::Send => self.finish_send(result),
-        }
     }
 
     fn connect_signals(&self, add_attachment_button: gtk::Button) {
@@ -888,8 +899,6 @@ impl ComposePage {
             self.inner.title.set_subtitle("Identity unavailable");
             self.inner.account_rebind_pending.set(false);
             self.set_busy(false);
-            self.inner.save_button.set_sensitive(false);
-            self.inner.send_button.set_sensitive(false);
             return;
         };
         let previous = self.inner.signature.borrow().clone();
@@ -943,47 +952,49 @@ impl ComposePage {
         self.inner.identity_dropdown.set_selected(selected);
     }
 
-    fn begin_operation(&self, operation: ComposeOperation, status: &str) {
+    fn begin_operation(&self, operation: ComposeOperation) {
         assert_eq!(
             self.inner.active_operation.replace(Some(operation)),
             None,
             "compose operation already active"
         );
         self.set_busy(true);
-        self.inner.title.set_subtitle(status);
+        self.inner.title.set_subtitle(operation.progress_status());
     }
 
     fn start_save(&self) {
-        self.begin_operation(ComposeOperation::SaveDraft, "Saving…");
-        let account_id = self
-            .inner
-            .draft
-            .borrow()
-            .as_ref()
-            .map(|draft| draft.account_id.clone())
-            .expect("an active compose page must own a draft");
-        let service = self
-            .inner
-            .mailbox
-            .borrow()
-            .draft_service(&account_id)
-            .expect("an enabled draft action must have an active account service");
+        self.start_operation(ComposeOperation::SaveDraft);
+    }
+
+    fn start_send(&self) {
+        self.start_operation(ComposeOperation::Send);
+    }
+
+    fn start_operation(&self, operation: ComposeOperation) {
+        self.begin_operation(operation);
+        let service = self.inner.mailbox.borrow().mail_service();
         let page = self.clone();
         self.inner
             .composer
             .capture_content(move |snapshot| match snapshot {
-                Ok(snapshot) => page.dispatch_save(
+                Ok(snapshot) => page.dispatch_operation(
+                    operation,
                     ComposerContent {
                         html: snapshot.html,
                         text: page.text_body(),
                     },
                     service,
                 ),
-                Err(error) => page.finish_operation_failure("Not saved", error),
+                Err(error) => page.finish_operation_failure(operation.failure_status(), error),
             });
     }
 
-    fn dispatch_save(&self, content: ComposerContent, service: crate::core::mail::MailService) {
+    fn dispatch_operation(
+        &self,
+        operation: ComposeOperation,
+        content: ComposerContent,
+        service: crate::core::mail::MailService,
+    ) {
         let mut draft = self
             .inner
             .draft
@@ -992,21 +1003,32 @@ impl ComposePage {
             .expect("an active compose operation must own a draft");
         draft.html_body = content.html;
         draft.text_body = content.text;
-        self.inner.cache.request_save_draft(service, draft);
+        match operation {
+            ComposeOperation::SaveDraft => self.inner.cache.request_save_draft(service, draft),
+            ComposeOperation::Send => self.inner.cache.request_send_draft(service, draft),
+        }
     }
 
-    fn finish_save(&self, result: Result<Option<crate::model::mail::MessageDetail>, String>) {
+    pub fn finish_save(
+        &self,
+        result: Result<Option<crate::model::mail::StoredMessageRef>, String>,
+    ) {
+        assert_eq!(
+            self.inner.active_operation.get(),
+            Some(ComposeOperation::SaveDraft),
+            "draft-save completion does not match the active operation"
+        );
         match result {
-            Ok(detail) => {
+            Ok(stored) => {
                 self.inner.active_operation.set(None);
                 {
                     let mut draft = self.inner.draft.borrow_mut();
                     let draft = draft
                         .as_mut()
                         .expect("a completed compose operation must still own its draft");
-                    if let Some(detail) = detail {
-                        draft.conversation_id = Some(detail.conversation_id);
-                        draft.message_id = Some(detail.message_id);
+                    if let Some(stored) = stored {
+                        draft.conversation_id = Some(stored.conversation_id);
+                        draft.message_id = Some(stored.message_id);
                     }
                 }
                 self.inner.dirty.set(false);
@@ -1025,49 +1047,12 @@ impl ComposePage {
         }
     }
 
-    fn start_send(&self) {
-        self.begin_operation(ComposeOperation::Send, "Sending…");
-        let account_id = self
-            .inner
-            .draft
-            .borrow()
-            .as_ref()
-            .map(|draft| draft.account_id.clone())
-            .expect("an active compose page must own a draft");
-        let service = self
-            .inner
-            .mailbox
-            .borrow()
-            .draft_service(&account_id)
-            .expect("an enabled send action must have an active account service");
-        let page = self.clone();
-        self.inner
-            .composer
-            .capture_content(move |snapshot| match snapshot {
-                Ok(snapshot) => page.dispatch_send(
-                    ComposerContent {
-                        html: snapshot.html,
-                        text: page.text_body(),
-                    },
-                    service,
-                ),
-                Err(error) => page.finish_operation_failure("Not sent", error),
-            });
-    }
-
-    fn dispatch_send(&self, content: ComposerContent, service: crate::core::mail::MailService) {
-        let mut draft = self
-            .inner
-            .draft
-            .borrow()
-            .clone()
-            .expect("an active compose operation must own a draft");
-        draft.html_body = content.html;
-        draft.text_body = content.text;
-        self.inner.cache.request_send_draft(service, draft);
-    }
-
-    fn finish_send(&self, result: Result<Option<crate::model::mail::MessageDetail>, String>) {
+    pub fn finish_send(&self, result: Result<(), String>) {
+        assert_eq!(
+            self.inner.active_operation.get(),
+            Some(ComposeOperation::Send),
+            "send completion does not match the active operation"
+        );
         match result {
             Ok(_) => {
                 self.inner.active_operation.set(None);
@@ -1117,20 +1102,7 @@ impl ComposePage {
     }
 
     fn write_available(&self) -> bool {
-        let Some(account_id) = self
-            .inner
-            .draft
-            .borrow()
-            .as_ref()
-            .map(|draft| draft.account_id.clone())
-        else {
-            return false;
-        };
-        self.inner
-            .mailbox
-            .borrow()
-            .draft_service(&account_id)
-            .is_some()
+        self.inner.draft.borrow().is_some()
     }
 
     fn add_attachments(&self) {
@@ -1285,9 +1257,64 @@ fn identity_signature(identity: &SendingIdentity) -> (String, String) {
 }
 
 fn apply_identity(draft: &mut DraftMessage, identity: &SendingIdentity) {
-    draft.alias_id = identity.id.clone();
     draft.from = identity.mailbox();
     draft.reply_to = identity.reply_to.clone();
+}
+
+fn identity_for_from<'a>(
+    identities: &'a [SendingIdentity],
+    from: &str,
+) -> Option<&'a SendingIdentity> {
+    if let Some(identity) = identities
+        .iter()
+        .find(|identity| identity.mailbox().eq_ignore_ascii_case(from.trim()))
+    {
+        return Some(identity);
+    }
+
+    let address = normalized_mailbox_address(from);
+    let display_name = mailbox_display_name(from);
+    if !display_name.is_empty()
+        && let Some(identity) = identities.iter().find(|identity| {
+            normalized_mailbox_address(&identity.address) == address
+                && identity.display_name.trim() == display_name
+        })
+    {
+        return Some(identity);
+    }
+
+    let mut matching_address = identities
+        .iter()
+        .filter(|identity| normalized_mailbox_address(&identity.address) == address);
+    let identity = matching_address.next()?;
+    matching_address.next().is_none().then_some(identity)
+}
+
+fn mailbox_display_name(mailbox: &str) -> String {
+    let display = mailbox
+        .split_once('<')
+        .map(|(display, _)| display.trim())
+        .unwrap_or_default();
+    let display = display
+        .strip_prefix('"')
+        .and_then(|display| display.strip_suffix('"'))
+        .unwrap_or(display);
+    let mut normalized = String::new();
+    let mut escaped = false;
+    for ch in display.chars() {
+        if escaped {
+            normalized.push(ch);
+            escaped = false;
+        } else if ch == '\\' {
+            escaped = true;
+        } else {
+            normalized.push(ch);
+        }
+    }
+    if escaped {
+        normalized.push('\\');
+    }
+    normalized
 }
 
 fn rebind_draft_account(
@@ -1405,8 +1432,9 @@ fn rebuild_attachment_list(list: &gtk::ListBox, attachments: &[AttachmentInfo]) 
 #[cfg(test)]
 mod tests {
     use super::{
-        ComposeViewModel, attachment_heading, has_optional_recipients, rebind_draft_account,
-        replace_signature_content, replace_signature_content_with_separator,
+        ComposeViewModel, apply_identity, attachment_heading, has_optional_recipients,
+        identity_for_from, rebind_draft_account, replace_signature_content,
+        replace_signature_content_with_separator,
     };
     use crate::integration::backend::stub_backend;
     use crate::integration::stub::stub_account;
@@ -1449,7 +1477,7 @@ mod tests {
     fn optional_recipient_fields_open_only_when_the_draft_already_uses_them() {
         let mut draft = crate::model::mail::DraftMessage::empty(
             MailAccountId("account-1".into()),
-            AliasId("account-1:primary".into()),
+            "Primary <primary@example.test>".into(),
         );
         assert!(!has_optional_recipients(&draft));
         draft.cc.push("copy@example.test".into());
@@ -1457,6 +1485,60 @@ mod tests {
         draft.cc.clear();
         draft.bcc.push("hidden@example.test".into());
         assert!(has_optional_recipients(&draft));
+    }
+
+    #[test]
+    fn draft_from_claims_the_exact_alias_before_another_same_address_identity() {
+        let identities = vec![
+            SendingIdentity::with_id(
+                AliasId("account-1:primary".into()),
+                "shared@example.test".into(),
+                "Primary Name".into(),
+                None,
+                String::new(),
+                String::new(),
+                true,
+                true,
+            ),
+            SendingIdentity::with_id(
+                AliasId("account-1:alias".into()),
+                "shared@example.test".into(),
+                "Alias Name".into(),
+                None,
+                String::new(),
+                String::new(),
+                false,
+                false,
+            ),
+        ];
+
+        let selected = identity_for_from(&identities, "Alias Name <shared@example.test>").unwrap();
+
+        assert_eq!(selected.id.0, "account-1:alias");
+        assert!(identity_for_from(&identities, "shared@example.test").is_none());
+    }
+
+    #[test]
+    fn changing_identity_materializes_mail_headers_in_the_draft() {
+        let mut draft = crate::model::mail::DraftMessage::empty(
+            MailAccountId("account-1".into()),
+            "Primary <primary@example.test>".into(),
+        );
+        let alias = SendingIdentity::with_id(
+            AliasId("account-1:alias".into()),
+            "alias@example.test".into(),
+            "Alias Name".into(),
+            Some("replies@example.test".into()),
+            String::new(),
+            String::new(),
+            false,
+            false,
+        );
+
+        apply_identity(&mut draft, &alias);
+
+        assert_eq!(draft.from, "\"Alias Name\" <alias@example.test>");
+        assert_eq!(draft.reply_to.as_deref(), Some("replies@example.test"));
     }
 
     #[test]
@@ -1520,7 +1602,7 @@ mod tests {
     fn account_rebind_preserves_authored_content_but_resets_draft_provenance() {
         let mut draft = crate::model::mail::DraftMessage::empty(
             MailAccountId("account-a".into()),
-            AliasId("account-a:primary".into()),
+            "Old Sender <old@example.test>".into(),
         );
         draft.to = vec!["recipient@example.test".into()];
         draft.subject = "Preserved subject".into();
@@ -1556,7 +1638,6 @@ mod tests {
         );
 
         assert_eq!(draft.account_id.0, "account-b");
-        assert_eq!(draft.alias_id.0, "account-b:alias");
         assert_eq!(draft.from, "\"Sender\" <sender@example.test>");
         assert_eq!(draft.reply_to.as_deref(), Some("reply@example.test"));
         assert_eq!(draft.to, ["recipient@example.test"]);

@@ -4,6 +4,7 @@ use gtk::{CssProvider, gdk, gio};
 use std::cell::RefCell;
 use std::collections::HashSet;
 use std::rc::Rc;
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use crate::app::accounts::AccountRuntime;
@@ -12,18 +13,52 @@ use crate::model::account::MailAccountId;
 use crate::model::mail::{FolderId, MailtoRequest};
 use crate::ui::mailbox::{MailboxViewModel, MainWindow};
 
+const REGISTRY_CHANGE_DEBOUNCE: Duration = Duration::from_millis(400);
+const REGISTRY_FAILURE_RETRY: Duration = Duration::from_secs(30);
+
 struct RegistryChanges {
-    receiver: std::sync::mpsc::Receiver<String>,
-    _monitor: crate::integration::registry::Monitor,
+    receiver: mpsc::Receiver<MailAccountId>,
+    _monitor_guard: crate::integration::registry::Monitor,
+}
+
+struct PendingRediscovery {
+    affected_accounts: Vec<MailAccountId>,
+    receiver: mpsc::Receiver<anyhow::Result<MailboxViewModel>>,
+}
+
+#[derive(Default)]
+struct RediscoverySchedule {
+    accounts: HashSet<MailAccountId>,
+    due: Option<Instant>,
+}
+
+impl RediscoverySchedule {
+    fn record_change(&mut self, account_id: MailAccountId, now: Instant) {
+        self.accounts.insert(account_id);
+        self.due = Some(now + REGISTRY_CHANGE_DEBOUNCE);
+    }
+
+    fn retry(&mut self, accounts: &[MailAccountId], now: Instant) {
+        self.accounts.extend(accounts.iter().cloned());
+        self.due.get_or_insert(now + REGISTRY_FAILURE_RETRY);
+    }
+
+    fn take_due(&mut self, now: Instant) -> Option<Vec<MailAccountId>> {
+        if !self.due.is_some_and(|due| now >= due) {
+            return None;
+        }
+        self.due = None;
+        Some(self.accounts.drain().collect())
+    }
 }
 
 impl RegistryChanges {
     fn open() -> Self {
-        let (sender, receiver) = std::sync::mpsc::channel();
+        let (sender, receiver) = mpsc::channel();
         let monitor = start_registry_monitor(&sender);
         Self {
             receiver,
-            _monitor: monitor,
+            _monitor_guard: monitor,
         }
     }
 }
@@ -96,7 +131,7 @@ fn build_application() -> adw::Application {
     });
 
     let session_for_open = Rc::clone(&session);
-    app.connect_open(move |app, files, _hint| {
+    app.connect_open(move |app, files, _| {
         let mut opened = false;
         for file in files {
             match parse_mailto_open_uri(file.uri().as_str()) {
@@ -178,7 +213,7 @@ fn ensure_main_window(
     *slot.borrow_mut() = Some(window.clone());
 
     let mut registry_changes = Some(RegistryChanges::open());
-    let (sender, receiver) = std::sync::mpsc::channel();
+    let (sender, receiver) = mpsc::channel();
     let bootstrap_runtime = AccountRuntime::clone(runtime);
     std::thread::spawn(move || {
         let mailbox = bootstrap_runtime.initial_mailbox();
@@ -199,19 +234,10 @@ fn ensure_main_window(
                 );
                 glib::ControlFlow::Break
             }
-            Err(std::sync::mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
-            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+            Err(mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
+            Err(mpsc::TryRecvError::Disconnected) => {
                 tracing::error!("startup mailbox worker ended without a result");
-                window_for_bootstrap.replace_mailbox(MailboxViewModel::from_snapshot(
-                    vec![crate::integration::stub::stub_account()],
-                    crate::model::settings::AppSettings::default(),
-                    stub_backend(),
-                    crate::model::event::AccountMailboxSnapshot {
-                        mode: crate::model::mail::MailboxMode::StubUnavailable,
-                        folders: Vec::new(),
-                        conversations: Vec::new(),
-                    },
-                ));
+                window_for_bootstrap.replace_mailbox(AccountRuntime::unavailable_mailbox());
                 watch_account_registry(
                     &window_for_bootstrap,
                     &runtime_for_registry,
@@ -232,42 +258,35 @@ fn watch_account_registry(
     runtime: &AccountRuntime,
     registry: RegistryChanges,
 ) {
-    const CHANGE_DEBOUNCE: Duration = Duration::from_millis(400);
-
-    let mut pending_change = None::<Instant>;
-    let mut changed_accounts = HashSet::new();
-    let mut rediscovery: Option<
-        std::sync::mpsc::Receiver<(
-            Vec<crate::model::account::MailAccountId>,
-            anyhow::Result<MailboxViewModel>,
-        )>,
-    > = None;
+    let mut schedule = RediscoverySchedule::default();
+    let mut rediscovery = None::<PendingRediscovery>;
     let window = window.clone();
     let runtime = runtime.clone();
 
     glib::timeout_add_local(Duration::from_millis(100), move || {
         while let Ok(account_id) = registry.receiver.try_recv() {
-            changed_accounts.insert(crate::model::account::MailAccountId(account_id));
-            pending_change = Some(Instant::now());
+            schedule.record_change(account_id, Instant::now());
         }
 
         let mut worker_finished = false;
-        if let Some(receiver) = rediscovery.as_ref() {
-            match receiver.try_recv() {
-                Ok((affected_accounts, Ok(mailbox))) => {
-                    window.replace_mailbox_after_registry_change(mailbox, &affected_accounts);
+        if let Some(pending) = rediscovery.as_ref() {
+            match pending.receiver.try_recv() {
+                Ok(Ok(mailbox)) => {
+                    window
+                        .replace_mailbox_after_registry_change(mailbox, &pending.affected_accounts);
                     worker_finished = true;
                 }
-                Ok((affected_accounts, Err(error))) => {
-                    changed_accounts.extend(affected_accounts);
+                Ok(Err(error)) => {
+                    schedule.retry(&pending.affected_accounts, Instant::now());
                     crate::logging::report_deferred("eds-account-rediscovery", &error);
                     worker_finished = true;
                 }
-                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    schedule.retry(&pending.affected_accounts, Instant::now());
                     tracing::error!("EDS account rediscovery worker ended without a result");
                     worker_finished = true;
                 }
-                Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                Err(mpsc::TryRecvError::Empty) => {}
             }
         }
         if worker_finished {
@@ -275,27 +294,26 @@ fn watch_account_registry(
         }
 
         if rediscovery.is_none()
-            && pending_change.is_some_and(|changed_at| changed_at.elapsed() >= CHANGE_DEBOUNCE)
+            && let Some(changed_accounts) = schedule.take_due(Instant::now())
         {
-            pending_change = None;
-            let changed_accounts = changed_accounts.drain().collect::<Vec<_>>();
             let (settings, backend) = {
                 let mailbox = window.mailbox();
                 (
                     runtime.settings_for_mailbox(&mailbox),
-                    mailbox
-                        .current_account_id()
-                        .filter(|account_id| account_id.0 != "local-stub")
-                        .map(|_| mailbox.backend()),
+                    mailbox.retained_backend(),
                 )
             };
             let runtime = runtime.clone();
-            let (sender, receiver) = std::sync::mpsc::channel();
+            let (sender, receiver) = mpsc::channel();
+            let affected_accounts = changed_accounts.clone();
             std::thread::spawn(move || {
                 let result = runtime.rediscover_mailbox(settings, backend, &changed_accounts);
-                let _ = sender.send((changed_accounts, result));
+                let _ = sender.send(result);
             });
-            rediscovery = Some(receiver);
+            rediscovery = Some(PendingRediscovery {
+                affected_accounts,
+                receiver,
+            });
         }
 
         glib::ControlFlow::Continue
@@ -303,12 +321,12 @@ fn watch_account_registry(
 }
 
 fn start_registry_monitor(
-    sender: &std::sync::mpsc::Sender<String>,
+    sender: &mpsc::Sender<MailAccountId>,
 ) -> crate::integration::registry::Monitor {
     let sender = sender.clone();
     crate::integration::registry::Monitor::start(
         move |account_id| {
-            let _ = sender.send(account_id);
+            let _ = sender.send(MailAccountId(account_id));
         },
         |error| crate::logging::report_deferred("eds-registry-monitor", &error),
     )
@@ -332,7 +350,52 @@ fn load_app_css() {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_mailto_open_uri;
+    use super::{RediscoverySchedule, parse_mailto_open_uri};
+    use crate::model::account::MailAccountId;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn registry_changes_are_debounced_and_claimed_once() {
+        let start = Instant::now();
+        let mut schedule = RediscoverySchedule::default();
+        schedule.record_change(MailAccountId("account-1".into()), start);
+        schedule.record_change(
+            MailAccountId("account-2".into()),
+            start + Duration::from_millis(200),
+        );
+
+        assert!(
+            schedule
+                .take_due(start + Duration::from_millis(599))
+                .is_none()
+        );
+        let mut accounts = schedule
+            .take_due(start + Duration::from_millis(600))
+            .expect("the last change should release the batch");
+        accounts.sort_by(|left, right| left.0.cmp(&right.0));
+        assert_eq!(
+            accounts,
+            [
+                MailAccountId("account-1".into()),
+                MailAccountId("account-2".into())
+            ]
+        );
+        assert!(schedule.take_due(start + Duration::from_secs(1)).is_none());
+    }
+
+    #[test]
+    fn failed_rediscovery_preserves_accounts_and_retries_later() {
+        let start = Instant::now();
+        let mut schedule = RediscoverySchedule::default();
+        let accounts = [MailAccountId("account-1".into())];
+        schedule.retry(&accounts, start);
+
+        assert!(schedule.take_due(start + Duration::from_secs(29)).is_none());
+        assert_eq!(
+            schedule.take_due(start + Duration::from_secs(30)),
+            Some(Vec::from(accounts))
+        );
+    }
 
     #[test]
     fn accepts_standard_and_gfile_mailto_uris() {

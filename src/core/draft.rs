@@ -3,122 +3,101 @@ use crate::model::address::normalized_mailbox_address;
 use crate::model::mail::plain_text_to_html;
 use crate::model::mail::{DraftMessage, MailtoRequest, MessageDetail};
 
-pub struct DraftBuilder;
+pub fn create_draft(account_id: MailAccountId, identity: &SendingIdentity) -> DraftMessage {
+    draft_for_identity(account_id, identity)
+}
 
-impl DraftBuilder {
-    pub fn new() -> Self {
-        Self
+pub fn create_mailto_draft(
+    account_id: MailAccountId,
+    identity: &SendingIdentity,
+    request: &MailtoRequest,
+) -> DraftMessage {
+    let mut draft = draft_for_identity(account_id, identity);
+    draft.to = request.to.clone();
+    draft.cc = request.cc.clone();
+    draft.bcc = request.bcc.clone();
+    draft.subject = request.subject.clone();
+    if !request.body.is_empty() {
+        draft.text_body = join_authored_body(&request.body, &identity.signature_text, "\n\n");
+        let escaped_body = plain_text_to_html(&request.body);
+        draft.html_body = join_authored_body(&escaped_body, &identity.signature_html, "<br><br>");
     }
+    draft
+}
 
-    pub fn create_draft(
-        &self,
-        account_id: MailAccountId,
-        identity: &SendingIdentity,
-    ) -> DraftMessage {
-        draft_for_identity(account_id, identity)
-    }
+pub fn create_reply_draft(
+    account_id: MailAccountId,
+    identity: &SendingIdentity,
+    message: &MessageDetail,
+) -> DraftMessage {
+    let mut draft = draft_for_identity(account_id, identity);
+    draft.to = vec![
+        message
+            .reply_to
+            .as_ref()
+            .filter(|address| !address.trim().is_empty())
+            .unwrap_or(&message.from)
+            .clone(),
+    ];
+    draft.subject = prefixed_subject("Re:", &message.subject);
+    draft.text_body = quoted_reply_text(message, &identity.signature_text);
+    draft.html_body = quoted_reply_html(message, &identity.signature_html);
+    draft
+}
 
-    pub fn create_mailto_draft(
-        &self,
-        account_id: MailAccountId,
-        identity: &SendingIdentity,
-        request: &MailtoRequest,
-    ) -> DraftMessage {
-        let mut draft = draft_for_identity(account_id, identity);
-        draft.to = request.to.clone();
-        draft.cc = request.cc.clone();
-        draft.bcc = request.bcc.clone();
-        draft.subject = request.subject.clone();
-        if !request.body.is_empty() {
-            draft.text_body = join_authored_body(&request.body, &identity.signature_text, "\n\n");
-            let escaped_body = plain_text_to_html(&request.body);
-            draft.html_body =
-                join_authored_body(&escaped_body, &identity.signature_html, "<br><br>");
-        }
-        draft
-    }
+pub fn create_reply_all_draft(
+    account_id: MailAccountId,
+    identity: &SendingIdentity,
+    message: &MessageDetail,
+) -> DraftMessage {
+    let mut draft = create_reply_draft(account_id, identity, message);
+    let identity_address = normalized_mailbox_address(&identity.address);
+    let mut seen = draft
+        .to
+        .iter()
+        .map(|recipient| normalized_mailbox_address(recipient))
+        .collect::<std::collections::HashSet<_>>();
+    draft.cc = message
+        .to
+        .iter()
+        .chain(message.cc.iter())
+        .filter_map(|recipient| {
+            let address = normalized_mailbox_address(recipient);
+            (!address.is_empty() && address != identity_address && seen.insert(address))
+                .then(|| recipient.clone())
+        })
+        .collect();
+    draft
+}
 
-    pub fn create_reply_draft(
-        &self,
-        account_id: MailAccountId,
-        identity: &SendingIdentity,
-        message: &MessageDetail,
-    ) -> DraftMessage {
-        let mut draft = draft_for_identity(account_id, identity);
-        draft.reply_to = identity.reply_to.clone();
-        draft.to = vec![
-            message
-                .reply_to
-                .as_ref()
-                .filter(|address| !address.trim().is_empty())
-                .unwrap_or(&message.from)
-                .clone(),
-        ];
-        draft.subject = prefixed_subject("Re:", &message.subject);
-        draft.text_body = quoted_reply_text(message, &identity.signature_text);
-        draft.html_body = quoted_reply_html(message, &identity.signature_html);
-        draft
-    }
+pub fn create_forward_draft(
+    account_id: MailAccountId,
+    identity: &SendingIdentity,
+    message: &MessageDetail,
+) -> DraftMessage {
+    let mut draft = draft_for_identity(account_id, identity);
+    draft.subject = prefixed_subject("Fwd:", &message.subject);
+    draft.text_body = forwarded_text(message, &identity.signature_text);
+    draft.html_body = forwarded_html(message, &identity.signature_html);
+    draft
+}
 
-    pub fn create_reply_all_draft(
-        &self,
-        account_id: MailAccountId,
-        identity: &SendingIdentity,
-        message: &MessageDetail,
-    ) -> DraftMessage {
-        let mut draft = self.create_reply_draft(account_id, identity, message);
-        let identity_address = normalized_mailbox_address(&identity.address);
-        let mut seen = draft
-            .to
-            .iter()
-            .map(|recipient| normalized_mailbox_address(recipient))
-            .collect::<std::collections::HashSet<_>>();
-        draft.cc = message
-            .to
-            .iter()
-            .chain(message.cc.iter())
-            .filter_map(|recipient| {
-                let address = normalized_mailbox_address(recipient);
-                (!address.is_empty() && address != identity_address && seen.insert(address))
-                    .then(|| recipient.clone())
-            })
-            .collect();
-        draft
-    }
-
-    pub fn create_forward_draft(
-        &self,
-        account_id: MailAccountId,
-        identity: &SendingIdentity,
-        message: &MessageDetail,
-    ) -> DraftMessage {
-        let mut draft = draft_for_identity(account_id, identity);
-        draft.reply_to = identity.reply_to.clone();
-        draft.subject = prefixed_subject("Fwd:", &message.subject);
-        draft.text_body = forwarded_text(message, &identity.signature_text);
-        draft.html_body = forwarded_html(message, &identity.signature_html);
-        draft
-    }
-
-    pub fn create_edit_draft(
-        &self,
-        account_id: MailAccountId,
-        identity: &SendingIdentity,
-        message: &MessageDetail,
-    ) -> DraftMessage {
-        let mut draft = draft_for_identity(account_id, identity);
-        draft.conversation_id = Some(message.conversation_id.clone());
-        draft.message_id = Some(message.message_id.clone());
-        draft.reply_to = identity.reply_to.clone();
-        draft.to = message.to.clone();
-        draft.cc = message.cc.clone();
-        draft.bcc = message.bcc.clone();
-        draft.subject = message.subject.clone();
-        draft.attachments = message.attachments.clone();
-        draft.text_body = message.body.text_part().unwrap_or_default().to_string();
-        draft.html_body = message.body.html_part().unwrap_or_default().to_string();
-        draft
-    }
+pub fn create_edit_draft(
+    account_id: MailAccountId,
+    identity: &SendingIdentity,
+    message: &MessageDetail,
+) -> DraftMessage {
+    let mut draft = draft_for_identity(account_id, identity);
+    draft.conversation_id = Some(message.conversation_id.clone());
+    draft.message_id = Some(message.message_id.clone());
+    draft.to = message.to.clone();
+    draft.cc = message.cc.clone();
+    draft.bcc = message.bcc.clone();
+    draft.subject = message.subject.clone();
+    draft.attachments = message.attachments.clone();
+    draft.text_body = message.body.text_part().unwrap_or_default().to_string();
+    draft.html_body = message.body.html_part().unwrap_or_default().to_string();
+    draft
 }
 
 fn join_authored_body(body: &str, signature: &str, separator: &str) -> String {
@@ -130,8 +109,7 @@ fn join_authored_body(body: &str, signature: &str, separator: &str) -> String {
 }
 
 fn draft_for_identity(account_id: MailAccountId, identity: &SendingIdentity) -> DraftMessage {
-    let mut draft = DraftMessage::empty(account_id, identity.id.clone());
-    draft.from = identity.mailbox();
+    let mut draft = DraftMessage::empty(account_id, identity.mailbox());
     draft.reply_to = identity.reply_to.clone();
     draft.text_body = identity.signature_text.clone();
     draft.html_body = identity.signature_html.clone();
@@ -234,6 +212,7 @@ mod tests {
             "<p>Signature</p>".into(),
             "Signature".into(),
             true,
+            true,
         )
     }
 
@@ -263,11 +242,34 @@ mod tests {
 
     #[test]
     fn new_draft_starts_with_both_identity_signature_representations() {
-        let draft =
-            DraftBuilder::new().create_draft(MailAccountId("account-1".into()), &identity());
+        let draft = create_draft(MailAccountId("account-1".into()), &identity());
 
         assert_eq!(draft.text_body, "Signature");
         assert_eq!(draft.html_body, "<p>Signature</p>");
+    }
+
+    #[test]
+    fn every_draft_kind_materializes_the_selected_identity_headers() {
+        let mut identity = identity();
+        identity.reply_to = Some("Replies <reply@example.test>".into());
+        let account_id = MailAccountId("account-1".into());
+        let source = message();
+        let drafts = [
+            create_draft(account_id.clone(), &identity),
+            create_mailto_draft(account_id.clone(), &identity, &MailtoRequest::default()),
+            create_reply_draft(account_id.clone(), &identity, &source),
+            create_reply_all_draft(account_id.clone(), &identity, &source),
+            create_forward_draft(account_id.clone(), &identity, &source),
+            create_edit_draft(account_id, &identity, &source),
+        ];
+
+        for draft in drafts {
+            assert_eq!(draft.from, "\"Me\" <me@example.com>");
+            assert_eq!(
+                draft.reply_to.as_deref(),
+                Some("Replies <reply@example.test>")
+            );
+        }
     }
 
     #[test]
@@ -279,11 +281,7 @@ mod tests {
             subject: "Subject".into(),
             body: "A < B\nSecond line".into(),
         };
-        let draft = DraftBuilder::new().create_mailto_draft(
-            MailAccountId("account-1".into()),
-            &identity(),
-            &request,
-        );
+        let draft = create_mailto_draft(MailAccountId("account-1".into()), &identity(), &request);
 
         assert_eq!(draft.to, request.to);
         assert_eq!(draft.cc, request.cc);
@@ -298,7 +296,7 @@ mod tests {
 
     #[test]
     fn blank_mailto_body_keeps_the_normal_signature_only_draft() {
-        let draft = DraftBuilder::new().create_mailto_draft(
+        let draft = create_mailto_draft(
             MailAccountId("account-1".into()),
             &identity(),
             &MailtoRequest::default(),
@@ -313,7 +311,7 @@ mod tests {
         let mut identity = identity();
         identity.signature_text.clear();
         identity.signature_html.clear();
-        let draft = DraftBuilder::new().create_mailto_draft(
+        let draft = create_mailto_draft(
             MailAccountId("account-1".into()),
             &identity,
             &MailtoRequest {
@@ -328,11 +326,7 @@ mod tests {
 
     #[test]
     fn editing_a_draft_preserves_its_message_identity_and_html() {
-        let draft = DraftBuilder::new().create_edit_draft(
-            MailAccountId("account-1".into()),
-            &identity(),
-            &message(),
-        );
+        let draft = create_edit_draft(MailAccountId("account-1".into()), &identity(), &message());
 
         assert_eq!(draft.message_id.as_ref().unwrap().0, "message-1");
         assert_eq!(draft.conversation_id.as_ref().unwrap().0, "conversation-1");
@@ -344,11 +338,7 @@ mod tests {
         let mut message = message();
         message.body = MessageBody::from_parts(String::new(), "A < B\nSecond line".into());
 
-        let draft = DraftBuilder::new().create_edit_draft(
-            MailAccountId("account-1".into()),
-            &identity(),
-            &message,
-        );
+        let draft = create_edit_draft(MailAccountId("account-1".into()), &identity(), &message);
 
         assert_eq!(draft.text_body, "A < B\nSecond line");
         assert!(draft.html_body.is_empty());
@@ -359,11 +349,7 @@ mod tests {
         let mut message = message();
         message.body = MessageBody::from_parts("<p>Rich only</p>".into(), String::new());
 
-        let draft = DraftBuilder::new().create_edit_draft(
-            MailAccountId("account-1".into()),
-            &identity(),
-            &message,
-        );
+        let draft = create_edit_draft(MailAccountId("account-1".into()), &identity(), &message);
 
         assert_eq!(draft.html_body, "<p>Rich only</p>");
         assert!(draft.text_body.is_empty());
@@ -374,11 +360,7 @@ mod tests {
         let mut message = message();
         message.body = MessageBody::Empty;
 
-        let draft = DraftBuilder::new().create_edit_draft(
-            MailAccountId("account-1".into()),
-            &identity(),
-            &message,
-        );
+        let draft = create_edit_draft(MailAccountId("account-1".into()), &identity(), &message);
 
         assert!(draft.text_body.is_empty());
         assert!(draft.html_body.is_empty());
@@ -386,11 +368,8 @@ mod tests {
 
     #[test]
     fn reply_all_excludes_the_sender_identity_and_deduplicates_recipients() {
-        let draft = DraftBuilder::new().create_reply_all_draft(
-            MailAccountId("account-1".into()),
-            &identity(),
-            &message(),
-        );
+        let draft =
+            create_reply_all_draft(MailAccountId("account-1".into()), &identity(), &message());
 
         assert_eq!(draft.to, vec!["Sender <sender@example.com>"]);
         assert_eq!(draft.cc, vec!["other@example.com", "third@example.com"]);
@@ -413,16 +392,9 @@ mod tests {
             "<>".into(),
         ];
 
-        let reply = DraftBuilder::new().create_reply_draft(
-            MailAccountId("account-1".into()),
-            &identity(),
-            &message,
-        );
-        let reply_all = DraftBuilder::new().create_reply_all_draft(
-            MailAccountId("account-1".into()),
-            &identity(),
-            &message,
-        );
+        let reply = create_reply_draft(MailAccountId("account-1".into()), &identity(), &message);
+        let reply_all =
+            create_reply_all_draft(MailAccountId("account-1".into()), &identity(), &message);
 
         assert_eq!(reply.to, vec!["Replies <reply@example.test>"]);
         assert_eq!(

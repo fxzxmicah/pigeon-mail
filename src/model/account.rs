@@ -13,7 +13,6 @@ pub struct AliasId(pub String);
 pub struct MailAccount {
     pub id: MailAccountId,
     pub display_name: String,
-    pub primary_address: String,
     pub aliases: Vec<SendingIdentity>,
 }
 
@@ -32,10 +31,6 @@ pub struct SendingIdentity {
 impl MailAccount {
     pub fn selector_label(&self) -> String {
         self.display_name.clone()
-    }
-
-    pub fn display_label(&self) -> String {
-        format!("{} <{}>", self.display_name, self.primary_address)
     }
 
     pub fn default_identity(&self) -> Option<&SendingIdentity> {
@@ -102,8 +97,8 @@ impl SendingIdentity {
         signature_html: String,
         signature_text: String,
         is_default: bool,
+        is_primary_address: bool,
     ) -> Self {
-        let is_primary_address = id.0.ends_with(":primary");
         let signature_html = normalized_signature_html(signature_html, &signature_text);
         Self {
             id,
@@ -147,6 +142,7 @@ mod tests {
             String::new(),
             String::new(),
             true,
+            false,
         )
     }
 
@@ -173,6 +169,7 @@ mod tests {
             "<strong>Rich</strong>".into(),
             "Plain".into(),
             false,
+            false,
         );
         assert_eq!(rich.signature_html, "<strong>Rich</strong>");
 
@@ -184,7 +181,35 @@ mod tests {
             String::new(),
             "A < B\nSecond line".into(),
             false,
+            false,
         );
         assert_eq!(plain.signature_html, "A &lt; B<br>Second line");
+    }
+
+    #[test]
+    fn identity_role_is_explicit_and_independent_of_its_stable_id() {
+        let primary = SendingIdentity::with_id(
+            AliasId("stable-random-id".into()),
+            "primary@example.test".into(),
+            "Primary".into(),
+            None,
+            String::new(),
+            String::new(),
+            true,
+            true,
+        );
+        let alias = SendingIdentity::with_id(
+            AliasId("looks-like:primary".into()),
+            "alias@example.test".into(),
+            "Alias".into(),
+            None,
+            String::new(),
+            String::new(),
+            false,
+            false,
+        );
+
+        assert!(primary.is_primary_address);
+        assert!(!alias.is_primary_address);
     }
 }

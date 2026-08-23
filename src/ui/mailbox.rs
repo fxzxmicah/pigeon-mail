@@ -16,7 +16,7 @@ use crate::model::mail::{FolderId, MailtoRequest};
 use super::compose::{ComposeKind, ComposePage, ComposeViewModel};
 use super::dialogs::{build_settings, present_about};
 
-const AUTO_REFRESH_INTERVAL_SECS: u32 = 300;
+const AUTO_REFRESH_INTERVAL_SECS: u32 = 180;
 
 #[derive(Clone)]
 pub struct MainWindow {
@@ -237,7 +237,6 @@ impl MainWindow {
         let toolbar_view = adw::ToolbarView::new();
         toolbar_view.add_top_bar(&header);
         toolbar_view.set_content(Some(&page_stack));
-
         toast_overlay.set_child(Some(&toolbar_view));
 
         inner.set_content(Some(&toast_overlay));
@@ -572,20 +571,21 @@ impl MainWindow {
                             toast_for_events.add_toast(adw::Toast::new(&error));
                         }
                     }
-                    CacheEvent::ComposeOperationCompleted { operation, result } => {
-                        compose_page_for_events.finish_operation(operation, result);
+                    CacheEvent::DraftSaveCompleted { result } => {
+                        compose_page_for_events.finish_save(result);
+                    }
+                    CacheEvent::SendCompleted { result } => {
+                        compose_page_for_events.finish_send(result);
                     }
                     CacheEvent::AttachmentPrepared {
                         disposition,
                         display_name,
-                        source_uri,
                         result,
                     } => handle_prepared_attachment(
                         &parent_for_events,
                         &toast_for_events,
                         disposition,
                         display_name,
-                        source_uri,
                         result,
                     ),
                 }
@@ -660,7 +660,7 @@ impl MainWindow {
         }
         *self.mailbox.borrow_mut() = mailbox;
         self.compose_page.mailbox_replaced();
-        let prefer_html_view = self.mailbox.borrow().prefer_html_view;
+        let prefer_html_view = self.mailbox.borrow().prefer_html_view();
         self.sidebar
             .preview_widgets
             .set_prefer_html_view(prefer_html_view);
@@ -855,7 +855,7 @@ fn build_account_dropdown(
             cache.request_account_activation(
                 activation.service,
                 activation.request_id,
-                activation.account,
+                activation.account_id,
                 activation.conversation_limit,
             );
         }
@@ -871,9 +871,10 @@ pub(super) fn refresh_account_dropdown(dropdown: &gtk::DropDown, mailbox: &Mailb
         .collect();
     let refs: Vec<&str> = labels.iter().map(String::as_str).collect();
     let model = gtk::StringList::new(&refs);
-    let _notifications = dropdown.freeze_notify();
+    let notifications = dropdown.freeze_notify();
     dropdown.set_model(Some(&model));
     dropdown.set_selected(mailbox.selected_account as u32);
+    drop(notifications);
 }
 
 fn apply_pending_folder(
@@ -1476,7 +1477,7 @@ fn build_preview_panel(
         let state = Rc::clone(&state_for_attachment_actions);
         let toast_overlay = preview.toast_overlay.clone();
         move |disposition, attachment| {
-            let request = state.borrow().current_attachment_request(&attachment.uri);
+            let request = state.borrow().current_attachment_request();
             if !cache_for_attachment_actions.request_attachment(
                 request,
                 disposition,
@@ -1935,11 +1936,13 @@ impl PreviewWidgets {
             self.cc_recipients
                 .set_label(&format!("Cc: {}", detail.cc.join(", ")));
             self.cc_recipients.set_visible(!detail.cc.is_empty());
-            self.reply_to_value.set_label(&format!(
-                "Reply-To: {}",
-                detail.reply_to.as_deref().unwrap_or("Use sender address")
-            ));
-            self.reply_to_value.set_visible(detail.reply_to.is_some());
+            if let Some(reply_to) = detail.reply_to.as_deref() {
+                self.reply_to_value
+                    .set_label(&format!("Reply-To: {reply_to}"));
+                self.reply_to_value.set_visible(true);
+            } else {
+                self.reply_to_value.set_visible(false);
+            }
             rebuild_preview_attachment_list(
                 &self.attachments_list,
                 &detail.attachments,
@@ -2020,21 +2023,14 @@ fn handle_prepared_attachment(
     toast_overlay: &adw::ToastOverlay,
     disposition: AttachmentDisposition,
     attachment_name: String,
-    source_uri: String,
-    result: Result<Option<String>, String>,
+    result: Result<String, String>,
 ) {
-    let resolved_uri = match result {
-        Ok(Some(uri)) => Some(uri),
-        Ok(None) => (source_uri.contains("://")
-            && !source_uri.starts_with("pigeon-eds-attachment:"))
-        .then_some(source_uri),
+    let uri = match result {
+        Ok(uri) => uri,
         Err(error) => {
             toast_overlay.add_toast(adw::Toast::new(&error));
-            None
+            return;
         }
-    };
-    let Some(uri) = resolved_uri else {
-        return;
     };
 
     match disposition {
@@ -2066,31 +2062,23 @@ fn handle_prepared_attachment(
                     return;
                 };
                 let source = gio::File::for_uri(&uri);
-                let copy_result = source
-                    .path()
-                    .zip(target.path())
-                    .ok_or_else(|| {
-                        "attachment source or destination is not a local path".to_string()
-                    })
-                    .and_then(|(source_path, target_path)| {
-                        std::fs::copy(&source_path, &target_path)
-                            .map(|_| ())
-                            .map_err(|error| {
-                                format!(
-                                    "copy from '{}' to '{}' failed: {error}",
-                                    source_path.display(),
-                                    target_path.display()
-                                )
-                            })
-                    });
-                let message = match copy_result {
-                    Ok(_) => format!("Saved {attachment_name}"),
-                    Err(error) => {
-                        crate::logging::report_failure("attachment-save", &error);
-                        format!("Not saved: {attachment_name}")
-                    }
-                };
-                toast_overlay.add_toast(adw::Toast::new(&message));
+                source.copy_async(
+                    &target,
+                    gio::FileCopyFlags::OVERWRITE,
+                    glib::Priority::DEFAULT,
+                    None::<&gio::Cancellable>,
+                    None,
+                    move |result| {
+                        let message = match result {
+                            Ok(_) => format!("Saved {attachment_name}"),
+                            Err(error) => {
+                                crate::logging::report_failure("attachment-save", &error);
+                                format!("Not saved: {attachment_name}")
+                            }
+                        };
+                        toast_overlay.add_toast(adw::Toast::new(&message));
+                    },
+                );
             });
         }
     }

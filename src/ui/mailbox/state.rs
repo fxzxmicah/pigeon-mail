@@ -22,24 +22,31 @@ pub struct MailboxViewModel {
     pub has_more_threads: bool,
     thread_page_offset: usize,
     pending_thread_page: Option<ThreadPageRequest>,
-    next_thread_page_request_id: u64,
     pending_search: Option<SearchRequest>,
-    next_search_request_id: u64,
     pending_account_activation: Option<AccountActivationRequest>,
-    next_account_activation_request_id: u64,
     pending_mailbox_reload: Option<MailboxReloadRequest>,
-    next_mailbox_reload_request_id: u64,
     pending_message_actions: std::collections::HashSet<(MailAccountId, ConversationId)>,
     refresh_failures: std::collections::HashMap<MailAccountId, RefreshFailureKind>,
     pub selected_thread: Option<ConversationId>,
     pub message_detail: Option<MessageDetail>,
     pub message_detail_loading: bool,
     pending_message_detail: Option<MessageDetailRequest>,
-    next_message_detail_request_id: u64,
+    request_ids: RequestSequence,
     pub message_detail_error: Option<String>,
     pub search_query: String,
     pub search_error: Option<String>,
-    pub prefer_html_view: bool,
+    prefer_html_view: bool,
+}
+
+#[derive(Default)]
+struct RequestSequence(u64);
+
+impl RequestSequence {
+    fn next(&mut self) -> u64 {
+        let request_id = self.0;
+        self.0 = self.0.wrapping_add(1);
+        request_id
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -79,7 +86,7 @@ struct MessageDetailRequest {
 pub struct AccountActivationLoad {
     pub service: MailService,
     pub request_id: u64,
-    pub account: MailAccount,
+    pub account_id: MailAccountId,
     pub conversation_limit: usize,
 }
 
@@ -139,20 +146,16 @@ impl MailboxViewModel {
             has_more_threads: false,
             thread_page_offset: 0,
             pending_thread_page: None,
-            next_thread_page_request_id: 0,
             pending_search: None,
-            next_search_request_id: 0,
             pending_account_activation: None,
-            next_account_activation_request_id: 0,
             pending_mailbox_reload: None,
-            next_mailbox_reload_request_id: 0,
             pending_message_actions: std::collections::HashSet::new(),
             refresh_failures: std::collections::HashMap::new(),
             selected_thread: None,
             message_detail: None,
             message_detail_loading: false,
             pending_message_detail: None,
-            next_message_detail_request_id: 0,
+            request_ids: RequestSequence::default(),
             message_detail_error: None,
             search_query: String::new(),
             search_error: None,
@@ -198,20 +201,16 @@ impl MailboxViewModel {
             has_more_threads,
             thread_page_offset,
             pending_thread_page: None,
-            next_thread_page_request_id: 0,
             pending_search: None,
-            next_search_request_id: 0,
             pending_account_activation: None,
-            next_account_activation_request_id: 0,
             pending_mailbox_reload: None,
-            next_mailbox_reload_request_id: 0,
             pending_message_actions: std::collections::HashSet::new(),
             refresh_failures: std::collections::HashMap::new(),
             selected_thread: None,
             message_detail: None,
             message_detail_loading: false,
             pending_message_detail: None,
-            next_message_detail_request_id: 0,
+            request_ids: RequestSequence::default(),
             message_detail_error: None,
             search_query: String::new(),
             search_error: None,
@@ -245,8 +244,10 @@ impl MailboxViewModel {
         self.service.eds_binding(&account.id)
     }
 
-    pub(crate) fn backend(&self) -> SharedMailBackend {
-        self.service.backend()
+    pub(crate) fn retained_backend(&self) -> Option<SharedMailBackend> {
+        self.current_account_id()
+            .filter(|account_id| !crate::integration::stub::is_stub_account_id(account_id))
+            .map(|_| self.service.backend())
     }
 
     pub fn can_compose(&self) -> bool {
@@ -293,6 +294,10 @@ impl MailboxViewModel {
         self.prefer_html_view = prefer_html_view;
     }
 
+    pub fn prefer_html_view(&self) -> bool {
+        self.prefer_html_view
+    }
+
     pub fn current_folder(&self) -> Option<&MailFolder> {
         self.folders.get(self.selected_folder)
     }
@@ -317,12 +322,11 @@ impl MailboxViewModel {
         if index >= self.accounts.len() || index == self.selected_account {
             return None;
         }
-        let account = self.accounts[index].clone();
-        let request_id = self.next_account_activation_request_id;
-        self.next_account_activation_request_id = request_id.wrapping_add(1);
+        let account_id = self.accounts[index].id.clone();
+        let request_id = self.request_ids.next();
         self.pending_account_activation = Some(AccountActivationRequest {
             request_id,
-            account_id: account.id.clone(),
+            account_id: account_id.clone(),
         });
         self.selected_account = index;
         self.selected_folder = 0;
@@ -340,7 +344,7 @@ impl MailboxViewModel {
         Some(AccountActivationLoad {
             service: self.service.clone(),
             request_id,
-            account,
+            account_id,
             conversation_limit: CONVERSATION_PAGE_SIZE,
         })
     }
@@ -427,12 +431,11 @@ impl MailboxViewModel {
         }
     }
 
-    pub fn eds_binding_for_account(
+    pub fn eds_binding(
         &self,
-        account_index: usize,
+        account_id: &MailAccountId,
     ) -> Option<crate::integration::backend::EdsAccountBinding> {
-        let account = self.accounts.get(account_index)?;
-        self.service.eds_binding(&account.id)
+        self.service.eds_binding(account_id)
     }
 
     pub fn account_identity(
@@ -522,8 +525,7 @@ impl MailboxViewModel {
         self.threads.clear();
         self.thread_page_offset = 0;
         let account_id = self.current_account()?.id.clone();
-        let request_id = self.next_search_request_id;
-        self.next_search_request_id = self.next_search_request_id.wrapping_add(1);
+        let request_id = self.request_ids.next();
         self.pending_search = Some(SearchRequest {
             request_id,
             account_id: account_id.clone(),
@@ -617,8 +619,7 @@ impl MailboxViewModel {
             return None;
         }
         let account_id = self.current_account_id()?;
-        let request_id = self.next_mailbox_reload_request_id;
-        self.next_mailbox_reload_request_id = request_id.wrapping_add(1);
+        let request_id = self.request_ids.next();
         self.pending_mailbox_reload = Some(MailboxReloadRequest {
             request_id,
             account_id: account_id.clone(),
@@ -704,8 +705,7 @@ impl MailboxViewModel {
     fn begin_thread_page_load_at(&mut self, offset: usize) -> Option<ThreadPageLoad> {
         let account_id = self.current_account()?.id.clone();
         let folder_id = self.current_folder()?.id.clone();
-        let request_id = self.next_thread_page_request_id;
-        self.next_thread_page_request_id = self.next_thread_page_request_id.wrapping_add(1);
+        let request_id = self.request_ids.next();
         self.pending_thread_page = Some(ThreadPageRequest {
             request_id,
             account_id: account_id.clone(),
@@ -781,7 +781,7 @@ impl MailboxViewModel {
             .as_ref()
             .map(|detail| detail.unread)
             .or_else(|| self.current_thread().map(|thread| thread.unread_count > 0))?;
-        self.begin_message_action(MessageAction::SetUnread(!unread))
+        self.begin_message_action(MessageAction::SetRead(unread))
     }
 
     pub fn begin_archive_selected(&mut self) -> Option<MessageActionRequest> {
@@ -792,9 +792,8 @@ impl MailboxViewModel {
         self.begin_message_action(MessageAction::MoveTo(FolderId("trash".into())))
     }
 
-    pub fn draft_service(&self, account_id: &MailAccountId) -> Option<MailService> {
-        (!self.is_loading() && self.current_account_id().as_ref() == Some(account_id))
-            .then(|| self.service.clone())
+    pub(crate) fn mail_service(&self) -> MailService {
+        self.service.clone()
     }
 
     pub fn selected_message_action_pending(&self) -> bool {
@@ -861,7 +860,7 @@ impl MailboxViewModel {
                     detail.starred = *starred;
                 }
             }
-            MessageAction::SetUnread(unread) => {
+            MessageAction::SetRead(read) => {
                 let was_unread = self
                     .threads
                     .iter()
@@ -872,19 +871,19 @@ impl MailboxViewModel {
                     .iter_mut()
                     .find(|thread| thread.id == *conversation_id)
                 {
-                    thread.unread_count = u32::from(*unread);
+                    thread.unread_count = u32::from(!read);
                 }
                 if let Some(detail) = self
                     .message_detail
                     .as_mut()
                     .filter(|detail| detail.conversation_id == *conversation_id)
                 {
-                    detail.unread = *unread;
+                    detail.unread = !read;
                 }
                 if let (Some(was_unread), Some(folder)) =
                     (was_unread, self.folders.get_mut(self.selected_folder))
                 {
-                    match (was_unread, *unread) {
+                    match (was_unread, !read) {
                         (false, true) => {
                             folder.unread_count = folder.unread_count.saturating_add(1)
                         }
@@ -949,8 +948,7 @@ impl MailboxViewModel {
             return None;
         }
 
-        let request_id = self.next_message_detail_request_id;
-        self.next_message_detail_request_id = request_id.wrapping_add(1);
+        let request_id = self.request_ids.next();
         self.pending_message_detail = Some(MessageDetailRequest {
             request_id,
             account_id: account_id.clone(),
@@ -1011,15 +1009,13 @@ impl MailboxViewModel {
 
     pub fn current_attachment_request(
         &self,
-        attachment_uri: &str,
-    ) -> Option<(MailService, MailAccountId, ConversationId, String)> {
+    ) -> Option<(MailService, MailAccountId, ConversationId)> {
         let account = self.current_account()?;
         let conversation_id = self.selected_thread.as_ref()?;
         Some((
             self.service.clone(),
             account.id.clone(),
             conversation_id.clone(),
-            attachment_uri.to_string(),
         ))
     }
 }
@@ -1034,7 +1030,6 @@ mod tests {
         MailAccount {
             id: MailAccountId(id.into()),
             display_name: id.into(),
-            primary_address: format!("{id}@example.com"),
             aliases: vec![SendingIdentity::with_id(
                 AliasId(format!("{id}:primary")),
                 format!("{id}@example.com"),
@@ -1042,6 +1037,7 @@ mod tests {
                 None,
                 String::new(),
                 String::new(),
+                true,
                 true,
             )],
         }
@@ -1178,6 +1174,27 @@ mod tests {
         assert_eq!(mailbox.backend_summary(), "Stub/No account");
         assert!(mailbox.can_compose());
         assert!(mailbox.current_account_refresh_handle().is_none());
+        assert!(mailbox.retained_backend().is_none());
+    }
+
+    #[test]
+    fn real_unavailable_accounts_retain_their_backend() {
+        let backend = crate::integration::backend::lazy_mail_backend();
+        let mailbox = MailboxViewModel::from_snapshot(
+            vec![account("account-1")],
+            AppSettings::default(),
+            backend.clone(),
+            AccountMailboxSnapshot {
+                mode: MailboxMode::StubUnavailable,
+                folders: Vec::new(),
+                conversations: Vec::new(),
+            },
+        );
+
+        let retained = mailbox
+            .retained_backend()
+            .expect("a real account keeps its lazy backend while unavailable");
+        assert!(std::sync::Arc::ptr_eq(&retained, &backend));
     }
 
     #[test]
@@ -1276,6 +1293,20 @@ mod tests {
     }
 
     #[test]
+    fn unavailable_stub_keeps_no_op_writes_for_ui_exploration() {
+        let mailbox = loaded_mailbox(
+            Vec::new(),
+            AppSettings::default(),
+            crate::integration::backend::stub_backend(),
+            MailboxMode::StubUnavailable,
+        );
+        let account_id = mailbox.current_account_id().unwrap();
+
+        assert!(mailbox.can_compose());
+        assert_eq!(account_id.0, "local-stub");
+    }
+
+    #[test]
     fn only_the_empty_loading_model_is_a_bootstrap_placeholder() {
         let backend = crate::integration::backend::stub_backend();
         let placeholder = MailboxViewModel::loading_placeholder(backend.clone());
@@ -1312,12 +1343,11 @@ mod tests {
         assert!(mailbox.begin_account_activation(0).is_none());
         assert!(mailbox.begin_account_activation(usize::MAX).is_none());
         let request = mailbox.begin_account_activation(1).unwrap();
-        assert_eq!(request.account.id.0, "account-2");
+        assert_eq!(request.account_id.0, "account-2");
         assert!(mailbox.is_loading());
         assert!(mailbox.folders.is_empty());
         assert!(mailbox.threads.is_empty());
         assert!(mailbox.selected_thread.is_none());
-        assert!(mailbox.draft_service(&request.account.id).is_none());
 
         assert!(!mailbox.finish_account_activation(
             request.request_id,
@@ -1337,7 +1367,7 @@ mod tests {
         }];
         assert!(mailbox.finish_account_activation(
             request.request_id,
-            &request.account.id,
+            &request.account_id,
             Ok(AccountMailboxSnapshot {
                 mode: MailboxMode::Live,
                 folders: folders.clone(),
@@ -1350,12 +1380,6 @@ mod tests {
         assert_eq!(mailbox.folders[0].unread_count, 1);
         assert_eq!(mailbox.threads[0].id.0, "conversation-42");
         assert_eq!(mailbox.thread_page_offset, 1);
-        assert!(mailbox.draft_service(&request.account.id).is_some());
-        assert!(
-            mailbox
-                .draft_service(&MailAccountId("account-1".into()))
-                .is_none()
-        );
     }
 
     #[test]
@@ -1366,7 +1390,7 @@ mod tests {
 
         assert!(!mailbox.finish_account_activation(
             second_account.request_id,
-            &second_account.account.id,
+            &second_account.account_id,
             Ok(AccountMailboxSnapshot {
                 mode: MailboxMode::Live,
                 folders: Vec::new(),
@@ -1375,7 +1399,7 @@ mod tests {
         ));
         assert!(mailbox.finish_account_activation(
             first_account.request_id,
-            &first_account.account.id,
+            &first_account.account_id,
             Ok(AccountMailboxSnapshot {
                 mode: MailboxMode::StubUnavailable,
                 folders: Vec::new(),
@@ -1394,7 +1418,7 @@ mod tests {
 
         assert!(mailbox.finish_account_activation(
             request.request_id,
-            &request.account.id,
+            &request.account_id,
             Err("Account unavailable.".into()),
         ));
         assert!(!mailbox.is_loading());

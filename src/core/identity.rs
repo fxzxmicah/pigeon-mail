@@ -1,17 +1,17 @@
-use crate::integration::backend::EdsAccountBinding;
 use crate::model::account::{MailAccount, SendingIdentity};
 use crate::model::address::{normalized_mailbox_address, split_mailbox_list};
 
-pub(crate) fn merge_eds_profile(account: &mut MailAccount, binding: &EdsAccountBinding) {
-    let identity_name = binding
-        .identity_name
-        .as_deref()
+pub(crate) fn merge_eds_profile(
+    account: &mut MailAccount,
+    name: Option<&str>,
+    reply_to: Option<&str>,
+    aliases: Option<&str>,
+) {
+    let identity_name = name
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(str::to_owned);
-    let identity_reply_to = binding
-        .identity_reply_to
-        .as_deref()
+    let identity_reply_to = reply_to
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(str::to_owned);
@@ -26,11 +26,7 @@ pub(crate) fn merge_eds_profile(account: &mut MailAccount, binding: &EdsAccountB
     }
 
     let primary_identity = account.primary_identity().cloned();
-    let eds_aliases = binding
-        .identity_aliases
-        .as_deref()
-        .map(parse_aliases)
-        .unwrap_or_default();
+    let eds_aliases = aliases.map(parse_aliases).unwrap_or_default();
     let mut merged_aliases = Vec::new();
     let mut used = vec![false; account.aliases.len()];
 

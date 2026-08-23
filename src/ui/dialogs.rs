@@ -159,12 +159,12 @@ pub(super) fn build_settings(
         .column_spacing(12)
         .build();
     let username_label = gtk::Label::builder()
-        .label("Username")
+        .label("Name")
         .xalign(0.0)
         .css_classes(["mail-form-label"])
         .build();
     let email_label = gtk::Label::builder()
-        .label("Email Address")
+        .label("Address")
         .xalign(0.0)
         .css_classes(["mail-form-label"])
         .build();

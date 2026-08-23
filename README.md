@@ -13,7 +13,7 @@ Server and Camel, so reading and common message actions remain cache-first.
 - Text, HTML, and multipart composition with explicit conversion between text
   and HTML
 - Reply, reply-all, forward, aliases, Reply-To addresses, and signatures
-- Attachment viewing and sending
+- Attachment opening, asynchronous saving, and sending
 - Manual draft saving and a durable local outbox for deferred delivery
 - Desktop notifications for new unread mail in every folder of the active account
 - `mailto:` integration and a reusable full-window composer
@@ -85,7 +85,7 @@ data at normal release log levels.
 Pigeon Mail is designed for a modern GNOME desktop and the provider support
 available through GOA and EDS. It has no unified inbox, account-creation UI, or
 automatic draft saving. Provider-specific behavior and uncommon MIME structures
-may still require further compatibility work.
+remain ongoing interoperability work.
 
 Mail cache ownership remains with EDS/Camel. Pigeon-specific settings are stored
 under the `pigeon` directory in the user's XDG configuration directory; durable

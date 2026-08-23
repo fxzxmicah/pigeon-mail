@@ -4,13 +4,14 @@ use std::sync::{Arc, Mutex};
 use anyhow::anyhow;
 use futures::future::BoxFuture;
 
+use crate::integration::camel::FolderUri;
 use crate::integration::journal::{PendingMailActionStore, PendingMove};
 use crate::integration::registry::Snapshot;
 use crate::integration::stub::StubMailboxStore;
 use crate::model::account::{MailAccount, MailAccountId};
 use crate::model::mail::{
     ConversationId, ConversationSummary, DraftMessage, FolderId, FolderKind, MailFolder,
-    MailboxMode, MessageDetail,
+    MailboxMode, MessageDetail, StoredMessageRef,
 };
 
 mod pool;
@@ -36,26 +37,18 @@ pub(crate) struct AccountCatalog {
 
 pub(crate) fn discover_accounts() -> anyhow::Result<AccountCatalog> {
     let snapshot = crate::integration::registry::load_snapshot_via_ffi()?;
-    let accounts = accounts_from_registry(&snapshot);
-    let bindings = bind_accounts_to_triplets(&accounts, &snapshot)
-        .iter()
-        .map(EdsAccountBinding::from_resolved_triplet)
-        .collect::<Vec<_>>();
+    let catalog = catalog_from_registry(&snapshot);
     tracing::debug!(
-        accounts = snapshot.accounts.len(),
-        identities = snapshot.identities.len(),
-        transports = snapshot.transports.len(),
-        relationships = snapshot.relationships.len(),
         triplets = snapshot.triplets.len(),
-        bindings = bindings.len(),
+        bindings = catalog.bindings.len(),
         "EDS registry topology resolved"
     );
     tracing::info!(
-        accounts = accounts.len(),
-        bindings = bindings.len(),
+        accounts = catalog.accounts.len(),
+        bindings = catalog.bindings.len(),
         "EDS mail accounts discovered"
     );
-    Ok(AccountCatalog { accounts, bindings })
+    Ok(catalog)
 }
 
 impl AccountCatalog {
@@ -64,43 +57,37 @@ impl AccountCatalog {
     }
 }
 
-fn accounts_from_registry(snapshot: &Snapshot) -> Vec<MailAccount> {
+fn catalog_from_registry(snapshot: &Snapshot) -> AccountCatalog {
     let mut seen = HashSet::new();
-    let mut accounts = snapshot
+    let mut entries = snapshot
         .triplets
         .iter()
         .filter_map(|triplet| {
-            let account = triplet.account.as_ref()?;
             let identity = triplet.identity.as_ref()?;
             let transport = triplet.transport.as_ref()?;
             let account_id = usable_goa_triplet_id(triplet)?;
-            if !seen.insert(account_id.to_string()) {
-                return None;
-            }
             let primary_address = identity
                 .identity_address
                 .as_deref()
-                .or(identity.goa_address.as_deref())
-                .or(account.goa_address.as_deref())
-                .or(transport.goa_address.as_deref())?
+                .or(triplet.goa_address.as_deref())?
                 .trim();
             if primary_address.is_empty() {
+                return None;
+            }
+            if !seen.insert(account_id.to_string()) {
                 return None;
             }
             let display_name = identity
                 .identity_name
                 .as_deref()
-                .or(identity.goa_name.as_deref())
-                .or(account.goa_name.as_deref())
-                .or(transport.goa_name.as_deref())
+                .or(triplet.goa_name.as_deref())
                 .map(str::trim)
                 .filter(|name| !name.is_empty())
                 .unwrap_or(primary_address);
 
-            Some(MailAccount {
+            let mut account = MailAccount {
                 id: MailAccountId(account_id.to_string()),
                 display_name: display_name.to_string(),
-                primary_address: primary_address.to_string(),
                 aliases: vec![crate::model::account::SendingIdentity::with_id(
                     crate::model::account::AliasId(format!("{account_id}:primary")),
                     primary_address.to_string(),
@@ -109,48 +96,67 @@ fn accounts_from_registry(snapshot: &Snapshot) -> Vec<MailAccount> {
                     format!("<p>{display_name}</p>"),
                     display_name.to_string(),
                     true,
+                    true,
                 )],
-            })
+            };
+            crate::core::identity::merge_eds_profile(
+                &mut account,
+                identity.identity_name.as_deref(),
+                identity.identity_reply_to.as_deref(),
+                identity.identity_aliases.as_deref(),
+            );
+            let binding = EdsAccountBinding {
+                account_id: account.id.clone(),
+                account_uid: triplet.account.uid.clone(),
+                account_parent_uid: triplet.account.parent.clone()?,
+                account_backend_name: triplet.account.backend_name.clone()?,
+                account_auth_method: triplet.account.auth_method.clone(),
+                identity_uid: identity.uid.clone(),
+                transport_uid: transport.uid.clone(),
+                transport_backend_name: transport.backend_name.clone()?,
+                transport_auth_method: transport.auth_method.clone(),
+                drafts_folder: identity
+                    .drafts_folder
+                    .clone()
+                    .or_else(|| triplet.account.drafts_folder.clone()),
+                sent_folder: transport
+                    .sent_folder
+                    .clone()
+                    .or_else(|| identity.sent_folder.clone()),
+            };
+            Some((account, binding))
         })
         .collect::<Vec<_>>();
-    accounts.sort_by(|left, right| {
+    entries.sort_by(|(left, _), (right, _)| {
         left.display_name
             .cmp(&right.display_name)
             .then_with(|| left.id.0.cmp(&right.id.0))
     });
-    accounts
+    let (accounts, bindings) = entries.into_iter().unzip();
+    AccountCatalog { accounts, bindings }
 }
 
 fn usable_goa_triplet_id(triplet: &crate::integration::registry::MailTriplet) -> Option<&str> {
-    let account = triplet.account.as_ref()?;
+    let account = &triplet.account;
     let identity = triplet.identity.as_ref()?;
     let transport = triplet.transport.as_ref()?;
-    if account.mail_enabled == Some(false)
-        || account.uid.as_deref().is_none_or(str::is_empty)
-        || identity.uid.as_deref().is_none_or(str::is_empty)
-        || transport.uid.as_deref().is_none_or(str::is_empty)
+    if triplet.mail_enabled == Some(false)
+        || account.uid.is_empty()
+        || identity.uid.is_empty()
+        || transport.uid.is_empty()
+        || account.parent.as_deref().is_none_or(str::is_empty)
         || account.backend_name.as_deref().is_none_or(str::is_empty)
         || transport.backend_name.as_deref().is_none_or(str::is_empty)
     {
         return None;
     }
 
-    let account_id = account
+    let account_id = triplet
         .goa_account_id
         .as_deref()
         .map(str::trim)
         .filter(|id| !id.is_empty())?;
-    let identity_id = identity
-        .goa_account_id
-        .as_deref()
-        .map(str::trim)
-        .filter(|id| !id.is_empty())?;
-    let transport_id = transport
-        .goa_account_id
-        .as_deref()
-        .map(str::trim)
-        .filter(|id| !id.is_empty())?;
-    (identity_id == account_id && transport_id == account_id).then_some(account_id)
+    Some(account_id)
 }
 
 const LOCAL_MESSAGE_CONVERSATION_ID_SEPARATOR: char = '\u{1f}';
@@ -190,12 +196,12 @@ fn classify_cached_delivery(
 }
 
 pub trait MailBackend: Send + Sync + 'static {
-    fn activate_account(&self, account: &MailAccount)
-    -> BoxFuture<'_, anyhow::Result<MailboxMode>>;
+    fn activate_account(
+        &self,
+        account_id: &MailAccountId,
+    ) -> BoxFuture<'_, anyhow::Result<MailboxMode>>;
 
-    fn invalidate_account(&self, _account_id: &MailAccountId) {}
-
-    fn replace_available_bindings(&self, _bindings: &[EdsAccountBinding]) {}
+    fn update_binding_catalog(&self, _: &[EdsAccountBinding], _: &[MailAccountId]) {}
 
     fn eds_binding(&self, account_id: &MailAccountId) -> Option<EdsAccountBinding>;
 
@@ -256,47 +262,32 @@ pub trait MailBackend: Send + Sync + 'static {
 
     fn save_draft(
         &self,
-        account_id: &MailAccountId,
         draft: &DraftMessage,
-    ) -> BoxFuture<'_, anyhow::Result<Option<MessageDetail>>>;
+    ) -> BoxFuture<'_, anyhow::Result<Option<StoredMessageRef>>>;
 
-    fn send_draft(
-        &self,
-        account_id: &MailAccountId,
-        draft: &DraftMessage,
-    ) -> BoxFuture<'_, anyhow::Result<Option<MessageDetail>>>;
+    fn send_draft(&self, draft: &DraftMessage) -> BoxFuture<'_, anyhow::Result<bool>>;
 }
 
 pub type SharedMailBackend = Arc<dyn MailBackend>;
 
 #[derive(Debug, Clone)]
 pub struct EdsAccountBinding {
-    pub account_id: String,
-    pub account_label: String,
-    pub account_uid: Option<String>,
-    pub account_parent_uid: Option<String>,
-    pub account_backend_name: Option<String>,
+    pub account_id: MailAccountId,
+    pub account_uid: String,
+    pub account_parent_uid: String,
+    pub account_backend_name: String,
     pub account_auth_method: Option<String>,
-    pub identity_uid: Option<String>,
-    pub identity_name: Option<String>,
-    pub identity_reply_to: Option<String>,
-    pub identity_aliases: Option<String>,
-    pub transport_uid: Option<String>,
-    pub transport_backend_name: Option<String>,
+    pub identity_uid: String,
+    pub transport_uid: String,
+    pub transport_backend_name: String,
     pub transport_auth_method: Option<String>,
     pub drafts_folder: Option<String>,
     pub sent_folder: Option<String>,
 }
 
 fn ensure_eds_local_mail_configuration(binding: &mut EdsAccountBinding) -> anyhow::Result<()> {
-    let Some(identity_uid) = binding.identity_uid.clone() else {
-        return Ok(());
-    };
     let local_root_path = crate::integration::camel::account_cache_root_for_binding(binding)?;
-    let collection_uid = binding
-        .account_parent_uid
-        .clone()
-        .ok_or_else(|| anyhow!("EDS binding is missing account_parent_uid"))?;
+    let collection_uid = &binding.account_parent_uid;
     let mail_root = std::path::Path::new(&local_root_path)
         .parent()
         .map(|path| path.join("mail").to_string_lossy().into_owned())
@@ -308,7 +299,7 @@ fn ensure_eds_local_mail_configuration(binding: &mut EdsAccountBinding) -> anyho
     let outbox_uri = format!("folder://local/{collection_uid}/Outbox");
     if binding.drafts_folder.as_deref() != Some(drafts_uri.as_str()) {
         crate::integration::registry::ensure_local_drafts_configuration(
-            &identity_uid,
+            &binding.identity_uid,
             &drafts_uri,
         )?;
     }
@@ -324,9 +315,7 @@ pub fn sync_account_identity_to_eds(
     binding: &EdsAccountBinding,
     account: &MailAccount,
 ) -> anyhow::Result<()> {
-    let Some(identity_uid) = binding.identity_uid.as_deref() else {
-        return Ok(());
-    };
+    let identity_uid = binding.identity_uid.as_str();
 
     let primary_identity = account
         .aliases
@@ -393,70 +382,26 @@ struct BackendSelection {
 }
 
 pub fn stub_backend() -> SharedMailBackend {
-    Arc::new(Backend::from_accounts(&[], Vec::new())) as SharedMailBackend
-}
-
-#[derive(Debug, Clone)]
-struct ResolvedTripletBinding {
-    account_id: String,
-    account_label: String,
-    account_uid: Option<String>,
-    account_parent_uid: Option<String>,
-    account_backend_name: Option<String>,
-    account_auth_method: Option<String>,
-    identity_uid: Option<String>,
-    identity_name: Option<String>,
-    identity_reply_to: Option<String>,
-    identity_aliases: Option<String>,
-    transport_uid: Option<String>,
-    transport_backend_name: Option<String>,
-    transport_auth_method: Option<String>,
-    drafts_folder: Option<String>,
-    sent_folder: Option<String>,
-}
-
-impl EdsAccountBinding {
-    fn from_resolved_triplet(binding: &ResolvedTripletBinding) -> Self {
-        Self {
-            account_id: binding.account_id.clone(),
-            account_label: binding.account_label.clone(),
-            account_uid: binding.account_uid.clone(),
-            account_parent_uid: binding.account_parent_uid.clone(),
-            account_backend_name: binding.account_backend_name.clone(),
-            account_auth_method: binding.account_auth_method.clone(),
-            identity_uid: binding.identity_uid.clone(),
-            identity_name: binding.identity_name.clone(),
-            identity_reply_to: binding.identity_reply_to.clone(),
-            identity_aliases: binding.identity_aliases.clone(),
-            transport_uid: binding.transport_uid.clone(),
-            transport_backend_name: binding.transport_backend_name.clone(),
-            transport_auth_method: binding.transport_auth_method.clone(),
-            drafts_folder: binding.drafts_folder.clone(),
-            sent_folder: binding.sent_folder.clone(),
-        }
-    }
+    Arc::new(Backend::new(None)) as SharedMailBackend
 }
 
 fn select_mail_backend(
-    accounts: &[MailAccount],
-    mut eds_bindings: Vec<EdsAccountBinding>,
+    mut eds_binding: EdsAccountBinding,
     pending_mail_actions: PendingMailActionStore,
 ) -> BackendSelection {
-    if let Err(error) = eds_bindings
-        .iter_mut()
-        .try_for_each(ensure_eds_local_mail_configuration)
-    {
+    let eds_binding = if let Err(error) = ensure_eds_local_mail_configuration(&mut eds_binding) {
         crate::logging::report_failure("local-mail-cache-initialization", &error);
-        eds_bindings.clear();
-    }
-    let mode = if eds_bindings.is_empty() {
-        MailboxMode::StubUnavailable
+        None
     } else {
-        MailboxMode::Live
+        Some(eds_binding)
     };
-    let backend = Arc::new(Backend::from_accounts_with_pending_actions(
-        accounts,
-        eds_bindings,
+    let mode = if eds_binding.is_some() {
+        MailboxMode::Live
+    } else {
+        MailboxMode::StubUnavailable
+    };
+    let backend = Arc::new(Backend::with_pending_actions(
+        eds_binding,
         pending_mail_actions,
     )) as SharedMailBackend;
     BackendSelection { backend, mode }
@@ -465,74 +410,36 @@ fn select_mail_backend(
 #[derive(Clone)]
 pub(crate) struct Backend {
     stub_store: Arc<StubMailboxStore>,
-    eds_bindings: Vec<EdsAccountBinding>,
-    camel_sessions:
-        Arc<Mutex<HashMap<String, Arc<Mutex<crate::integration::camel::AccountSession>>>>>,
-    cached_folders: Arc<Mutex<HashMap<String, Vec<MailFolder>>>>,
-    cached_conversations: Arc<Mutex<HashMap<(String, String), Vec<ConversationSummary>>>>,
-    configured_remote_sent: Arc<Mutex<HashMap<String, String>>>,
+    eds_binding: Option<EdsAccountBinding>,
+    cached_session: Arc<Mutex<Option<Arc<Mutex<crate::integration::camel::AccountSession>>>>>,
+    cached_folders: Arc<Mutex<Option<Vec<MailFolder>>>>,
+    cached_conversations: Arc<Mutex<HashMap<String, Vec<ConversationSummary>>>>,
+    configured_remote_sent: Arc<Mutex<Option<String>>>,
     pending_mail_actions: PendingMailActionStore,
-    sending_addresses: Arc<HashMap<(String, String), String>>,
 }
 
 impl Backend {
-    pub(crate) fn from_accounts(
-        accounts: &[MailAccount],
-        eds_bindings: Vec<EdsAccountBinding>,
-    ) -> Self {
-        Self::from_accounts_with_pending_actions(
-            accounts,
-            eds_bindings,
-            PendingMailActionStore::open_default(),
-        )
+    pub(crate) fn new(eds_binding: Option<EdsAccountBinding>) -> Self {
+        Self::with_pending_actions(eds_binding, PendingMailActionStore::open_default())
     }
 
-    fn from_accounts_with_pending_actions(
-        accounts: &[MailAccount],
-        eds_bindings: Vec<EdsAccountBinding>,
+    fn with_pending_actions(
+        eds_binding: Option<EdsAccountBinding>,
         pending_mail_actions: PendingMailActionStore,
     ) -> Self {
-        let sending_addresses = accounts
-            .iter()
-            .flat_map(|account| {
-                account.aliases.iter().map(move |identity| {
-                    (
-                        (account.id.0.clone(), identity.id.0.clone()),
-                        identity.mailbox(),
-                    )
-                })
-            })
-            .collect();
         Self {
             stub_store: Arc::new(StubMailboxStore::seeded()),
-            eds_bindings,
-            camel_sessions: Arc::new(Mutex::new(HashMap::new())),
-            cached_folders: Arc::new(Mutex::new(HashMap::new())),
+            eds_binding,
+            cached_session: Arc::new(Mutex::new(None)),
+            cached_folders: Arc::new(Mutex::new(None)),
             cached_conversations: Arc::new(Mutex::new(HashMap::new())),
-            configured_remote_sent: Arc::new(Mutex::new(HashMap::new())),
+            configured_remote_sent: Arc::new(Mutex::new(None)),
             pending_mail_actions,
-            sending_addresses: Arc::new(sending_addresses),
         }
-    }
-
-    fn sender_for_draft(
-        &self,
-        account_id: &MailAccountId,
-        draft: &DraftMessage,
-    ) -> anyhow::Result<String> {
-        if !draft.from.trim().is_empty() {
-            return Ok(draft.from.clone());
-        }
-        self.sending_addresses
-            .get(&(account_id.0.clone(), draft.alias_id.0.clone()))
-            .cloned()
-            .ok_or_else(|| anyhow!("the selected sending identity is no longer available"))
     }
 
     fn live_binding(&self, account_id: &MailAccountId) -> Option<EdsAccountBinding> {
-        self.eds_binding(account_id).filter(|binding| {
-            binding.account_uid.is_some() && binding.account_backend_name.is_some()
-        })
+        self.eds_binding(account_id)
     }
 
     fn pending_moves_for_account(&self, account_id: &MailAccountId) -> Vec<PendingMove> {
@@ -556,7 +463,7 @@ impl Backend {
         self.pending_mail_actions
             .apply_move_overlay(account_id, &mut conversations);
         drop(conversations);
-        self.refresh_cached_folder_counts(account_id);
+        self.refresh_cached_folder_counts();
     }
 
     fn apply_pending_flag_overlay(&self, account_id: &MailAccountId) {
@@ -567,12 +474,11 @@ impl Backend {
         self.pending_mail_actions
             .apply_flag_overlay(account_id, &mut conversations);
         drop(conversations);
-        self.refresh_cached_folder_counts(account_id);
+        self.refresh_cached_folder_counts();
     }
 
     fn update_cached_conversation(
         &self,
-        account_id: &MailAccountId,
         conversation_id: &ConversationId,
         update: impl Fn(&mut ConversationSummary),
     ) {
@@ -581,11 +487,10 @@ impl Backend {
             .lock()
             .expect("conversation cache lock poisoned");
         let mut changed = false;
-        for ((cached_account_id, _), summaries) in conversations.iter_mut() {
-            if cached_account_id == &account_id.0
-                && let Some(summary) = summaries
-                    .iter_mut()
-                    .find(|summary| summary.id == *conversation_id)
+        for summaries in conversations.values_mut() {
+            if let Some(summary) = summaries
+                .iter_mut()
+                .find(|summary| summary.id == *conversation_id)
             {
                 update(summary);
                 changed = true;
@@ -593,18 +498,17 @@ impl Backend {
         }
         drop(conversations);
         if changed {
-            self.refresh_cached_folder_counts(account_id);
+            self.refresh_cached_folder_counts();
         }
     }
 
-    fn refresh_cached_folder_counts(&self, account_id: &MailAccountId) {
+    fn refresh_cached_folder_counts(&self) {
         let unread_counts = self
             .cached_conversations
             .lock()
             .expect("conversation cache lock poisoned")
             .iter()
-            .filter(|((cached_account_id, _), _)| cached_account_id == &account_id.0)
-            .map(|((_, folder_id), summaries)| {
+            .map(|(folder_id, summaries)| {
                 (
                     folder_id.clone(),
                     summaries.iter().map(|summary| summary.unread_count).sum(),
@@ -615,11 +519,12 @@ impl Backend {
             .cached_folders
             .lock()
             .expect("folder cache lock poisoned");
-        if let Some(folders) = folders.get_mut(&account_id.0) {
-            for folder in folders {
-                if let Some(unread_count) = unread_counts.get(&folder.id.0) {
-                    folder.unread_count = *unread_count;
-                }
+        let Some(folders) = folders.as_mut() else {
+            return;
+        };
+        for folder in folders {
+            if let Some(unread_count) = unread_counts.get(&folder.id.0) {
+                folder.unread_count = *unread_count;
             }
         }
     }
@@ -637,18 +542,18 @@ impl Backend {
         let mut completed = HashSet::new();
         for move_request in pending {
             match session.move_message(
-                &move_request.conversation_id,
+                &move_request.summary.id,
                 &move_request.destination_folder_id,
             ) {
                 Ok(()) => {
-                    completed.insert(move_request.conversation_id);
+                    completed.insert(move_request.summary.id);
                 }
                 Err(error) => {
                     crate::logging::report_deferred("pending-move-sync", &error);
                     development_probe_log!(
                         "pending move remains queued for account {} conversation {}: {}",
                         account_id.0,
-                        move_request.conversation_id.0,
+                        move_request.summary.id.0,
                         error
                     );
                 }
@@ -700,7 +605,7 @@ impl Backend {
     fn discard_pending_moves_without_remote_source(
         &self,
         account_id: &MailAccountId,
-        remote_conversations: &HashMap<(String, String), Vec<ConversationSummary>>,
+        remote_conversations: &HashMap<String, Vec<ConversationSummary>>,
     ) -> anyhow::Result<()> {
         let remote_ids = remote_conversations
             .values()
@@ -714,41 +619,39 @@ impl Backend {
         &self,
         binding: &EdsAccountBinding,
     ) -> anyhow::Result<Arc<Mutex<crate::integration::camel::AccountSession>>> {
-        let key = binding.account_id.clone();
-
-        let mut sessions = self
-            .camel_sessions
+        let mut cached_session = self
+            .cached_session
             .lock()
             .expect("camel session cache lock poisoned");
-        if let Some(session) = sessions.get(&key) {
+        if let Some(session) = cached_session.as_ref() {
             return Ok(Arc::clone(session));
         }
 
         let session = Arc::new(Mutex::new(
             crate::integration::camel::AccountSession::open_cached(binding)?,
         ));
-        sessions.insert(key, Arc::clone(&session));
+        *cached_session = Some(Arc::clone(&session));
         Ok(session)
     }
 
-    fn clear_live_cache_for_account(&self, account_id: &MailAccountId) {
-        self.cached_folders
+    fn clear_live_cache(&self) {
+        *self
+            .cached_folders
             .lock()
-            .expect("folder cache lock poisoned")
-            .remove(&account_id.0);
+            .expect("folder cache lock poisoned") = None;
         self.cached_conversations
             .lock()
             .expect("conversation cache lock poisoned")
-            .retain(|(cached_account_id, _), _| cached_account_id != &account_id.0);
-        self.camel_sessions
+            .clear();
+        *self
+            .cached_session
             .lock()
-            .expect("camel session cache lock poisoned")
-            .remove(&account_id.0);
+            .expect("camel session cache lock poisoned") = None;
     }
 
     fn refresh_live_cache_for_account(&self, account_id: &MailAccountId) -> anyhow::Result<()> {
         let Some(binding) = self.live_binding(account_id) else {
-            self.clear_live_cache_for_account(account_id);
+            self.clear_live_cache();
             return Ok(());
         };
 
@@ -760,12 +663,7 @@ impl Backend {
                 .iter()
                 .find(|folder| folder.kind == FolderKind::Drafts)
             {
-                self.replay_local_drafts(
-                    &binding,
-                    account_id,
-                    &remote_drafts.id,
-                    &mut online_session,
-                )?;
+                self.replay_local_drafts(&binding, &remote_drafts.id, &mut online_session)?;
             }
             let mut folders_to_refresh = initial_folders
                 .iter()
@@ -787,15 +685,14 @@ impl Backend {
             self.flush_pending_moves(account_id, &mut online_session)?;
 
             for folder_id in &folders_to_refresh {
-                if let Err(_error) =
-                    online_session.refresh_folder_info(&FolderId(folder_id.clone()))
+                if let Err(error) = online_session.refresh_folder_info(&FolderId(folder_id.clone()))
                 {
                     development_probe_log!(
-                        "EDS/Camel folder info refresh failed for {} folder {}: {}",
-                        binding.account_label,
+                        "EDS/Camel folder info refresh failed for folder {}: {}",
                         folder_id,
-                        _error
+                        error
                     );
+                    drop(error);
                 }
             }
 
@@ -805,8 +702,7 @@ impl Backend {
             for folder_id in &folders_to_refresh {
                 let folder_key = FolderId(folder_id.clone());
                 let conversations = online_session.list_conversations(&folder_key, 0, 0)?;
-                refreshed_conversations
-                    .insert((account_id.0.clone(), folder_id.clone()), conversations);
+                refreshed_conversations.insert(folder_id.clone(), conversations);
             }
 
             let remote_conversations = refreshed_conversations.clone();
@@ -823,45 +719,26 @@ impl Backend {
                     *counts.entry(message_id_hash).or_insert(0) += 1;
                     counts
                 });
-            let local_delivery =
-                self.replay_local_outbox(&binding, account_id, &remote_sent_hashes)?;
-            self.merge_local_drafts_source(
-                &binding,
-                account_id,
-                &mut folders,
-                &mut refreshed_conversations,
-            )?;
-            merge_local_delivery_view(
-                account_id,
-                &mut folders,
-                &mut refreshed_conversations,
-                local_delivery,
-            );
+            let local_delivery = self.replay_local_outbox(&binding, &remote_sent_hashes)?;
+            self.merge_local_drafts_source(&binding, &mut folders, &mut refreshed_conversations)?;
+            merge_local_delivery_view(&mut folders, &mut refreshed_conversations, local_delivery);
 
-            self.cached_folders
+            *self
+                .cached_folders
                 .lock()
-                .expect("folder cache lock poisoned")
-                .insert(account_id.0.clone(), folders);
-
-            {
-                let mut cache = self
-                    .cached_conversations
-                    .lock()
-                    .expect("conversation cache lock poisoned");
-                cache.retain(|(cached_account_id, _), _| cached_account_id != &account_id.0);
-                for (key, value) in &refreshed_conversations {
-                    cache.insert(key.clone(), value.clone());
-                }
-            }
-            self.apply_pending_move_overlay(account_id);
-            self.apply_pending_flag_overlay(account_id);
+                .expect("folder cache lock poisoned") = Some(folders);
 
             development_probe_log!(
-                "EDS/Camel refresh rebuilt cache for {}: folders={} conversation_folders={}",
-                binding.account_label,
+                "EDS/Camel refresh rebuilt cache: folders={} conversation_folders={}",
                 folders_to_refresh.len(),
                 refreshed_conversations.len()
             );
+            *self
+                .cached_conversations
+                .lock()
+                .expect("conversation cache lock poisoned") = refreshed_conversations;
+            self.apply_pending_move_overlay(account_id);
+            self.apply_pending_flag_overlay(account_id);
 
             Ok(())
         })();
@@ -871,13 +748,11 @@ impl Backend {
     fn merge_local_drafts_source(
         &self,
         binding: &EdsAccountBinding,
-        account_id: &MailAccountId,
         folders: &mut Vec<MailFolder>,
-        conversations: &mut HashMap<(String, String), Vec<ConversationSummary>>,
+        conversations: &mut HashMap<String, Vec<ConversationSummary>>,
     ) -> anyhow::Result<()> {
         self.merge_local_folder_source(
             binding.drafts_folder.as_deref(),
-            account_id,
             FolderKind::Drafts,
             "Drafts",
             folders,
@@ -888,23 +763,21 @@ impl Backend {
     fn replay_local_drafts(
         &self,
         binding: &EdsAccountBinding,
-        _account_id: &MailAccountId,
         remote_folder_id: &FolderId,
         online_session: &mut crate::integration::camel::AccountSession,
     ) -> anyhow::Result<()> {
         let Some(local_drafts_uri) = binding.drafts_folder.as_deref() else {
             return Ok(());
         };
-        let Some((source_uid, local_folder_name)) = parse_folder_uri(local_drafts_uri) else {
+        let Some(local_drafts) = FolderUri::parse_local(local_drafts_uri) else {
             return Ok(());
         };
-        if source_uid != "local" {
-            return Ok(());
-        }
 
-        let mut local_session =
-            crate::integration::camel::AccountSession::open_cached_source(source_uid, "maildir")?;
-        let local_folder_id = FolderId(local_folder_name.to_string());
+        let mut local_session = crate::integration::camel::AccountSession::open_cached_source(
+            local_drafts.source_uid(),
+            "maildir",
+        )?;
+        let local_folder_id = FolderId(local_drafts.folder_path().to_string());
         local_session.ensure_folder_path(&local_folder_id)?;
         let remote_by_message_id = online_session
             .list_message_sync_states(remote_folder_id)?
@@ -955,8 +828,7 @@ impl Backend {
                 Err(error) => {
                     crate::logging::report_deferred("remote-draft-upload", &error);
                     development_probe_log!(
-                        "local draft remains queued for account {} because remote append failed: {}",
-                        _account_id.0,
+                        "local draft remains queued because remote append failed: {}",
                         error
                     );
                 }
@@ -980,12 +852,8 @@ impl Backend {
         binding: &EdsAccountBinding,
         folders: &[MailFolder],
     ) -> anyhow::Result<()> {
-        let Some(identity_uid) = binding.identity_uid.as_deref() else {
-            return Ok(());
-        };
-        let Some(account_uid) = binding.account_uid.as_deref() else {
-            return Ok(());
-        };
+        let identity_uid = binding.identity_uid.as_str();
+        let account_uid = binding.account_uid.as_str();
         let Some(sent_folder) = folders
             .iter()
             .find(|folder| folder.kind == FolderKind::Sent)
@@ -997,49 +865,47 @@ impl Backend {
             .configured_remote_sent
             .lock()
             .expect("remote Sent configuration lock poisoned")
-            .get(&binding.account_id)
+            .as_ref()
             .is_some_and(|configured| configured == &sent_uri);
         if !already_configured && binding.sent_folder.as_deref() != Some(sent_uri.as_str()) {
             crate::integration::registry::set_sent_folder_configuration(identity_uid, &sent_uri)?;
         }
-        self.configured_remote_sent
+        *self
+            .configured_remote_sent
             .lock()
-            .expect("remote Sent configuration lock poisoned")
-            .insert(binding.account_id.clone(), sent_uri);
+            .expect("remote Sent configuration lock poisoned") = Some(sent_uri);
         Ok(())
     }
 
     fn merge_local_folder_source(
         &self,
         folder_uri: Option<&str>,
-        account_id: &MailAccountId,
         kind: FolderKind,
         fallback_name: &str,
         folders: &mut Vec<MailFolder>,
-        conversations: &mut HashMap<(String, String), Vec<ConversationSummary>>,
+        conversations: &mut HashMap<String, Vec<ConversationSummary>>,
     ) -> anyhow::Result<()> {
         let Some(folder_uri) = folder_uri else {
             return Ok(());
         };
-        let Some((source_uid, folder_name)) = parse_folder_uri(folder_uri) else {
+        let Some(folder_uri) = FolderUri::parse_local(folder_uri) else {
             return Ok(());
         };
-        if source_uid != "local" {
-            return Ok(());
-        }
 
-        let mut session =
-            crate::integration::camel::AccountSession::open_cached_source(source_uid, "maildir")?;
-        let local_folder_id = FolderId(folder_name.to_string());
+        let mut session = crate::integration::camel::AccountSession::open_cached_source(
+            folder_uri.source_uid(),
+            "maildir",
+        )?;
+        let local_folder_id = FolderId(folder_uri.folder_path().to_string());
         session.ensure_folder_path(&local_folder_id)?;
-        refresh_local_folder_best_effort(&mut session, &local_folder_id);
+        session.refresh_folder_info(&local_folder_id)?;
         let local_conversations = session.list_conversations(&local_folder_id, 0, 0)?;
 
         let display_folder_id = folders
             .iter()
             .find(|folder| folder.kind == kind)
             .map(|folder| folder.id.clone())
-            .unwrap_or_else(|| FolderId(folder_name.to_string()));
+            .unwrap_or_else(|| FolderId(folder_uri.folder_path().to_string()));
         if !folders.iter().any(|folder| folder.id == display_folder_id) {
             folders.push(MailFolder {
                 id: display_folder_id.clone(),
@@ -1050,7 +916,7 @@ impl Backend {
         }
 
         let merged = conversations
-            .entry((account_id.0.clone(), display_folder_id.0.clone()))
+            .entry(display_folder_id.0.clone())
             .or_default();
         merged.extend(local_conversations);
         merged.sort_by(|left, right| {
@@ -1075,29 +941,18 @@ impl Backend {
     fn replay_local_outbox(
         &self,
         binding: &EdsAccountBinding,
-        _account_id: &MailAccountId,
         remote_sent_hashes: &HashMap<u64, usize>,
     ) -> anyhow::Result<LocalDeliveryView> {
-        let Some(outbox_uri) = local_sibling_folder_uri(binding.drafts_folder.as_deref(), "Outbox")
+        let Some(outbox_folder_id) =
+            local_sibling_folder_id(binding.drafts_folder.as_deref(), "Outbox")
         else {
             return Ok(LocalDeliveryView::default());
         };
-        let (outbox_source_uid, outbox_folder_name) = parse_folder_uri(&outbox_uri)
-            .ok_or_else(|| anyhow!("could not resolve local EDS Outbox target"))?;
-        if outbox_source_uid != "local" {
-            return Err(anyhow!("Outbox is not backed by the local EDS source"));
-        }
-
-        let mut local_session = crate::integration::camel::AccountSession::open_cached_source(
-            outbox_source_uid,
-            "maildir",
-        )?;
-        let outbox_folder_id = FolderId(outbox_folder_name.to_string());
-        let local_sent_uri = local_sibling_folder_uri(binding.drafts_folder.as_deref(), "Sent")
-            .ok_or_else(|| anyhow!("could not resolve local EDS Sent fallback"))?;
-        let (_, local_sent_folder_name) = parse_folder_uri(&local_sent_uri)
-            .ok_or_else(|| anyhow!("could not parse local EDS Sent fallback"))?;
-        let local_sent_folder_id = FolderId(local_sent_folder_name.to_string());
+        let mut local_session =
+            crate::integration::camel::AccountSession::open_cached_source("local", "maildir")?;
+        let local_sent_folder_id =
+            local_sibling_folder_id(binding.drafts_folder.as_deref(), "Sent")
+                .ok_or_else(|| anyhow!("could not resolve local EDS Sent fallback"))?;
         local_session.ensure_folder_path(&outbox_folder_id)?;
         let queued = local_session.list_conversations(&outbox_folder_id, 0, 0)?;
         let sync_states = local_session
@@ -1141,8 +996,7 @@ impl Backend {
                 Err(error) => {
                     crate::logging::report_deferred("outbox-connect", &error);
                     development_probe_log!(
-                        "Outbox remains queued for account {} because transport is unavailable: {}",
-                        _account_id.0,
+                        "Outbox remains queued because transport is unavailable: {}",
                         error
                     );
                     None
@@ -1169,11 +1023,7 @@ impl Backend {
                 }
                 Err(error) => {
                     crate::logging::report_deferred("outbox-send", &error);
-                    development_probe_log!(
-                        "queued message remains in Outbox for account {}: {}",
-                        _account_id.0,
-                        error
-                    );
+                    development_probe_log!("queued message remains in Outbox: {}", error);
                 }
             }
         }
@@ -1236,9 +1086,8 @@ impl Backend {
 }
 
 fn merge_local_delivery_view(
-    account_id: &MailAccountId,
     folders: &mut Vec<MailFolder>,
-    conversations: &mut HashMap<(String, String), Vec<ConversationSummary>>,
+    conversations: &mut HashMap<String, Vec<ConversationSummary>>,
     local: LocalDeliveryView,
 ) {
     for (kind, local_conversations) in [
@@ -1275,7 +1124,7 @@ fn merge_local_delivery_view(
             });
         }
         let merged = conversations
-            .entry((account_id.0.clone(), display_folder_id.0.clone()))
+            .entry(display_folder_id.0.clone())
             .or_default();
         merged.extend(local_conversations);
         merged.sort_by(|left, right| {
@@ -1297,65 +1146,26 @@ fn merge_local_delivery_view(
     }
 }
 
-fn merge_local_drafts_folder_view(mut folders: Vec<MailFolder>) -> Vec<MailFolder> {
-    let drafts_indices = folders
-        .iter()
-        .enumerate()
-        .filter_map(|(index, folder)| matches!(folder.kind, FolderKind::Drafts).then_some(index))
-        .collect::<Vec<_>>();
-
-    if drafts_indices.len() <= 1 {
-        return folders;
-    }
-
-    let primary_index = drafts_indices[0];
-    let total_unread = drafts_indices
-        .iter()
-        .filter_map(|index| folders.get(*index))
-        .map(|folder| folder.unread_count)
-        .sum();
-
-    if let Some(primary) = folders.get_mut(primary_index) {
-        primary.unread_count = total_unread;
-    }
-
-    for index in drafts_indices.into_iter().skip(1).rev() {
-        folders.remove(index);
-    }
-
-    folders
-}
-
-fn append_draft_via_local_eds_cache(
-    folder_uri: &str,
-    from: &str,
+fn append_local_message(
+    folder_id: &FolderId,
     draft: &DraftMessage,
     is_draft: bool,
-) -> anyhow::Result<MessageDetail> {
-    let (source_uid, folder_name) = parse_folder_uri(folder_uri).ok_or_else(|| {
-        anyhow!(
-            "could not resolve local EDS folder target from '{}'",
-            folder_uri
-        )
-    })?;
-
+) -> anyhow::Result<StoredMessageRef> {
     let mut session =
-        crate::integration::camel::AccountSession::open_cached_source(source_uid, "maildir")?;
-    let folder_id = FolderId(folder_name.to_string());
-    session.ensure_folder_path(&folder_id)?;
+        crate::integration::camel::AccountSession::open_cached_source("local", "maildir")?;
+    session.ensure_folder_path(folder_id)?;
     let attachment_uris = draft
         .attachments
         .iter()
         .map(|attachment| attachment.uri.clone())
         .collect::<Vec<_>>();
     let request = crate::integration::camel::AppendMessageRequest {
-        source_uid,
         message_id: draft
             .message_id
             .as_ref()
             .map(|message_id| message_id.0.as_str()),
-        folder_id: &folder_id,
-        from,
+        folder_id,
+        from: &draft.from,
         reply_to: draft.reply_to.as_deref(),
         to: &draft.to,
         cc: &draft.cc,
@@ -1367,27 +1177,24 @@ fn append_draft_via_local_eds_cache(
         is_draft,
     };
 
-    let detail = session.append_message(&request).map_err(|error| {
+    let stored = session.append_message(&request).map_err(|error| {
         anyhow!(
-            "EDS local message append failed for source_uid='{}' folder_name='{}': {}",
-            source_uid,
-            folder_name,
+            "EDS local message append failed for folder_name='{}': {}",
+            folder_id.0,
             error
         )
     })?;
 
-    let detail = detail.ok_or_else(|| {
+    let stored = stored.ok_or_else(|| {
         anyhow!(
-            "EDS local message append returned no message detail for source_uid='{}' folder_name='{}'",
-            source_uid,
-            folder_name
+            "EDS local message append returned no message detail for folder_name='{}'",
+            folder_id.0
         )
     })?;
 
-    if source_uid == "local"
-        && let Some(previous_id) = draft.conversation_id.as_ref()
-        && previous_id != &detail.conversation_id
-        && replaces_local_draft(previous_id, folder_name)
+    if let Some(previous_id) = draft.conversation_id.as_ref()
+        && previous_id != &stored.conversation_id
+        && replaces_local_draft(previous_id, &folder_id.0)
         && let Err(error) = session.delete_message_permanently(previous_id)
     {
         // The new MIME is already durable. Reporting the whole save as failed
@@ -1396,7 +1203,7 @@ fn append_draft_via_local_eds_cache(
         crate::logging::report_failure("draft-cache-replace-cleanup", &error);
     }
 
-    Ok(detail)
+    Ok(stored)
 }
 
 fn replaces_local_draft(previous_id: &ConversationId, destination_folder: &str) -> bool {
@@ -1412,12 +1219,10 @@ fn replaces_local_draft(previous_id: &ConversationId, destination_folder: &str) 
     previous_leaf == "Drafts" && previous_parent == destination_parent
 }
 
-fn local_sibling_folder_uri(configured_uri: Option<&str>, sibling_name: &str) -> Option<String> {
-    let (source_uid, folder_name) = parse_folder_uri(configured_uri?)?;
-    if source_uid != "local" {
-        return None;
-    }
-    let parent = folder_name
+fn local_sibling_folder_id(configured_uri: Option<&str>, sibling_name: &str) -> Option<FolderId> {
+    let configured = FolderUri::parse_local(configured_uri?)?;
+    let parent = configured
+        .folder_path()
         .rsplit_once('/')
         .map(|(parent, _)| parent)
         .unwrap_or("");
@@ -1426,7 +1231,7 @@ fn local_sibling_folder_uri(configured_uri: Option<&str>, sibling_name: &str) ->
     } else {
         format!("{parent}/{sibling_name}")
     };
-    Some(format!("folder://{source_uid}/{sibling_path}"))
+    Some(FolderId(sibling_path))
 }
 
 fn is_local_conversation_id(binding: &EdsAccountBinding, conversation_id: &ConversationId) -> bool {
@@ -1440,22 +1245,16 @@ fn conversation_belongs_to_local_collection(
     let Some(local_folder) = conversation_local_folder_id(conversation_id) else {
         return false;
     };
-    let Some((source_uid, drafts_folder)) = drafts_uri.and_then(parse_folder_uri) else {
+    let Some(drafts_uri) = drafts_uri.and_then(FolderUri::parse_local) else {
         return false;
     };
-    if source_uid != "local" {
-        return false;
-    }
+    let drafts_folder = drafts_uri.folder_path();
     match drafts_folder.rsplit_once('/') {
         Some((collection, _)) if !collection.is_empty() => {
             local_folder == collection || local_folder.starts_with(&format!("{collection}/"))
         }
         _ => matches!(local_folder, "Drafts" | "Outbox" | "Sent"),
     }
-}
-
-fn parse_folder_uri(folder_uri: &str) -> Option<(&str, &str)> {
-    folder_uri.strip_prefix("folder://")?.split_once('/')
 }
 
 fn conversation_local_folder_id(conversation_id: &ConversationId) -> Option<&str> {
@@ -1468,21 +1267,11 @@ fn conversation_local_folder_id(conversation_id: &ConversationId) -> Option<&str
 fn refresh_local_conversation_folder(
     session: &mut crate::integration::camel::AccountSession,
     conversation_id: &ConversationId,
-) {
-    let Some(folder_name) = conversation_local_folder_id(conversation_id) else {
-        return;
-    };
+) -> anyhow::Result<()> {
+    let folder_name = conversation_local_folder_id(conversation_id)
+        .ok_or_else(|| anyhow!("local conversation id has no folder component"))?;
     let local_folder_id = FolderId(folder_name.to_string());
-    refresh_local_folder_best_effort(session, &local_folder_id);
-}
-
-fn refresh_local_folder_best_effort(
-    session: &mut crate::integration::camel::AccountSession,
-    folder_id: &FolderId,
-) {
-    if let Err(_error) = session.refresh_folder_info(folder_id) {
-        development_probe_log!("EDS/Camel local folder refresh failed: {}", _error);
-    }
+    session.refresh_folder_info(&local_folder_id)
 }
 
 fn slice_conversations(
@@ -1503,93 +1292,23 @@ fn slice_conversations(
     conversations[offset..end].to_vec()
 }
 
-fn bind_accounts_to_triplets(
-    accounts: &[MailAccount],
-    snapshot: &Snapshot,
-) -> Vec<ResolvedTripletBinding> {
-    accounts
-        .iter()
-        .filter_map(|account| {
-            let triplet = snapshot
-                .triplets
-                .iter()
-                .find(|triplet| usable_goa_triplet_id(triplet) == Some(account.id.0.as_str()))?;
-
-            Some(ResolvedTripletBinding {
-                account_id: account.id.0.clone(),
-                account_label: account.display_label(),
-                account_uid: triplet.account.as_ref().and_then(|entry| entry.uid.clone()),
-                account_parent_uid: triplet
-                    .account
-                    .as_ref()
-                    .and_then(|entry| entry.parent.clone()),
-                account_backend_name: triplet
-                    .account
-                    .as_ref()
-                    .and_then(|entry| entry.backend_name.clone()),
-                account_auth_method: triplet
-                    .account
-                    .as_ref()
-                    .and_then(|entry| entry.auth_method.clone()),
-                identity_uid: triplet
-                    .identity
-                    .as_ref()
-                    .and_then(|entry| entry.uid.clone()),
-                identity_name: triplet
-                    .identity
-                    .as_ref()
-                    .and_then(|entry| entry.identity_name.clone()),
-                identity_reply_to: triplet
-                    .identity
-                    .as_ref()
-                    .and_then(|entry| entry.identity_reply_to.clone()),
-                identity_aliases: triplet
-                    .identity
-                    .as_ref()
-                    .and_then(|entry| entry.identity_aliases.clone()),
-                transport_uid: triplet
-                    .transport
-                    .as_ref()
-                    .and_then(|entry| entry.uid.clone()),
-                transport_backend_name: triplet
-                    .transport
-                    .as_ref()
-                    .and_then(|entry| entry.backend_name.clone()),
-                transport_auth_method: triplet
-                    .transport
-                    .as_ref()
-                    .and_then(|entry| entry.auth_method.clone()),
-                drafts_folder: triplet
-                    .identity
-                    .as_ref()
-                    .and_then(|entry| entry.drafts_folder.clone())
-                    .or_else(|| {
-                        triplet
-                            .account
-                            .as_ref()
-                            .and_then(|entry| entry.drafts_folder.clone())
-                    }),
-                sent_folder: triplet
-                    .transport
-                    .as_ref()
-                    .and_then(|entry| entry.sent_folder.clone())
-                    .or_else(|| {
-                        triplet
-                            .identity
-                            .as_ref()
-                            .and_then(|entry| entry.sent_folder.clone())
-                    }),
-            })
-        })
-        .collect()
+fn allow_stub_write(account_id: &MailAccountId) -> anyhow::Result<()> {
+    if crate::integration::stub::is_stub_account_id(account_id) {
+        Ok(())
+    } else {
+        Err(anyhow!(
+            "mail cache is unavailable for account '{}'",
+            account_id.0
+        ))
+    }
 }
 
 impl MailBackend for Backend {
     fn activate_account(
         &self,
-        account: &MailAccount,
+        account_id: &MailAccountId,
     ) -> BoxFuture<'_, anyhow::Result<MailboxMode>> {
-        let mode = if self.live_binding(&account.id).is_some() {
+        let mode = if self.live_binding(account_id).is_some() {
             MailboxMode::Live
         } else {
             MailboxMode::StubUnavailable
@@ -1598,9 +1317,9 @@ impl MailBackend for Backend {
     }
 
     fn eds_binding(&self, account_id: &MailAccountId) -> Option<EdsAccountBinding> {
-        self.eds_bindings
-            .iter()
-            .find(|binding| binding.account_id == account_id.0)
+        self.eds_binding
+            .as_ref()
+            .filter(|binding| binding.account_id == *account_id)
             .cloned()
     }
 
@@ -1614,26 +1333,20 @@ impl MailBackend for Backend {
         let cached_folders = Arc::clone(&self.cached_folders);
         let this = self.clone();
         Box::pin(async move {
-            if let Some(cached) = cached_folders
-                .lock()
-                .expect("folder cache lock poisoned")
-                .get(&account_id.0)
-                .cloned()
-            {
-                return Ok(merge_local_drafts_folder_view(cached));
-            }
-
             if let Some(binding) = &eds_binding {
+                if let Some(cached) = cached_folders
+                    .lock()
+                    .expect("folder cache lock poisoned")
+                    .clone()
+                {
+                    return Ok(cached);
+                }
                 let session = this.session_for_binding(binding)?;
                 let folders = session
                     .lock()
                     .expect("camel account session lock poisoned")
                     .list_folders()?;
-                let folders = merge_local_drafts_folder_view(folders);
-                cached_folders
-                    .lock()
-                    .expect("folder cache lock poisoned")
-                    .insert(account_id.0.clone(), folders.clone());
+                *cached_folders.lock().expect("folder cache lock poisoned") = Some(folders.clone());
                 return Ok(folders);
             }
 
@@ -1655,16 +1368,15 @@ impl MailBackend for Backend {
         let cached_conversations = Arc::clone(&self.cached_conversations);
         let this = self.clone();
         Box::pin(async move {
-            if let Some(cached) = cached_conversations
-                .lock()
-                .expect("conversation cache lock poisoned")
-                .get(&(account_id.0.clone(), folder_id.0.clone()))
-                .cloned()
-            {
-                return Ok(slice_conversations(&cached, offset, limit));
-            }
-
             if let Some(binding) = &eds_binding {
+                if let Some(cached) = cached_conversations
+                    .lock()
+                    .expect("conversation cache lock poisoned")
+                    .get(&folder_id.0)
+                    .cloned()
+                {
+                    return Ok(slice_conversations(&cached, offset, limit));
+                }
                 let session = this.session_for_binding(binding)?;
                 let conversations = session
                     .lock()
@@ -1673,13 +1385,13 @@ impl MailBackend for Backend {
                 cached_conversations
                     .lock()
                     .expect("conversation cache lock poisoned")
-                    .insert((account_id.0.clone(), folder_id.0.clone()), conversations);
+                    .insert(folder_id.0.clone(), conversations);
                 this.apply_pending_move_overlay(&account_id);
                 this.apply_pending_flag_overlay(&account_id);
                 let conversations = cached_conversations
                     .lock()
                     .expect("conversation cache lock poisoned")
-                    .get(&(account_id.0.clone(), folder_id.0.clone()))
+                    .get(&folder_id.0)
                     .cloned()
                     .unwrap_or_default();
                 return Ok(slice_conversations(&conversations, offset, limit));
@@ -1707,7 +1419,7 @@ impl MailBackend for Backend {
                         crate::integration::camel::AccountSession::open_online_source(
                             "local", "maildir",
                         )?;
-                    refresh_local_conversation_folder(&mut session, &conversation_id);
+                    refresh_local_conversation_folder(&mut session, &conversation_id)?;
                     return session.get_message_detail(&conversation_id);
                 }
                 match this.session_for_binding(&binding) {
@@ -1716,23 +1428,23 @@ impl MailBackend for Backend {
                         match session.get_message_detail(&conversation_id) {
                             Ok(Some(detail)) => return Ok(Some(detail)),
                             Ok(None) => {}
-                            Err(_error) => {
+                            Err(error) => {
                                 development_probe_log!(
-                                    "EDS/Camel detail load failed for {} conversation {}: {}",
-                                    binding.account_label,
+                                    "EDS/Camel detail load failed for conversation {}: {}",
                                     conversation_id.0,
-                                    _error
+                                    error
                                 );
+                                drop(error);
                             }
                         }
                     }
-                    Err(_error) => {
+                    Err(error) => {
                         development_probe_log!(
-                            "EDS/Camel session open failed for {} while loading detail {}: {}",
-                            binding.account_label,
+                            "EDS/Camel session open failed while loading detail {}: {}",
                             conversation_id.0,
-                            _error
+                            error
                         );
+                        drop(error);
                     }
                 }
 
@@ -1741,8 +1453,7 @@ impl MailBackend for Backend {
                         Ok(detail) => return Ok(detail),
                         Err(error) => {
                             return Err(anyhow!(
-                                "EDS/Camel on-demand detail load failed for {} conversation {}: {}",
-                                binding.account_label,
+                                "EDS/Camel on-demand detail load failed for conversation {}: {}",
                                 conversation_id.0,
                                 error
                             ));
@@ -1750,8 +1461,7 @@ impl MailBackend for Backend {
                     },
                     Err(error) => {
                         return Err(anyhow!(
-                            "EDS/Camel online session open failed for {} while loading detail {}: {}",
-                            binding.account_label,
+                            "EDS/Camel online session open failed while loading detail {}: {}",
                             conversation_id.0,
                             error
                         ));
@@ -1780,7 +1490,7 @@ impl MailBackend for Backend {
                         crate::integration::camel::AccountSession::open_online_source(
                             "local", "maildir",
                         )?;
-                    refresh_local_conversation_folder(&mut session, &conversation_id);
+                    refresh_local_conversation_folder(&mut session, &conversation_id)?;
                     return session.export_attachment(&conversation_id, &attachment_uri);
                 }
 
@@ -1792,32 +1502,31 @@ impl MailBackend for Backend {
                             .export_attachment(&conversation_id, &attachment_uri);
                         match result {
                             Ok(uri) => return Ok(uri),
-                            Err(_error) => {
+                            Err(error) => {
                                 development_probe_log!(
-                                    "cached attachment export failed for {} conversation {} attachment {}: {}",
-                                    binding.account_label,
+                                    "cached attachment export failed for conversation {} attachment {}: {}",
                                     conversation_id.0,
                                     attachment_uri,
-                                    _error
+                                    error
                                 );
+                                drop(error);
                             }
                         }
                     }
-                    Err(_error) => {
+                    Err(error) => {
                         development_probe_log!(
-                            "cached session open failed for {} while exporting attachment {}: {}",
-                            binding.account_label,
+                            "cached session open failed while exporting attachment {}: {}",
                             attachment_uri,
-                            _error
+                            error
                         );
+                        drop(error);
                     }
                 }
 
                 let mut session = crate::integration::camel::AccountSession::open_online(&binding)
                     .map_err(|error| {
                         anyhow!(
-                            "online session open failed for {} while exporting attachment {}: {}",
-                            binding.account_label,
+                            "online session open failed while exporting attachment {}: {}",
                             attachment_uri,
                             error
                         )
@@ -1826,8 +1535,7 @@ impl MailBackend for Backend {
                     .export_attachment(&conversation_id, &attachment_uri)
                     .map_err(|error| {
                         anyhow!(
-                            "on-demand attachment export failed for {} conversation {} attachment {}: {}",
-                            binding.account_label,
+                            "on-demand attachment export failed for conversation {} attachment {}: {}",
                             conversation_id.0,
                             attachment_uri,
                             error
@@ -1863,9 +1571,8 @@ impl MailBackend for Backend {
                     cached_conversations
                         .lock()
                         .expect("conversation cache lock poisoned")
-                        .iter()
-                        .filter(|((cached_account_id, _), _)| cached_account_id == &account_id.0)
-                        .flat_map(|(_, conversations)| conversations.iter())
+                        .values()
+                        .flat_map(|conversations| conversations.iter())
                         .filter(|summary| summary_contains_query(summary, &query))
                         .cloned(),
                 );
@@ -1915,7 +1622,7 @@ impl MailBackend for Backend {
                         crate::integration::camel::AccountSession::open_cached_source(
                             "local", "maildir",
                         )?;
-                    refresh_local_conversation_folder(&mut session, &conversation_id);
+                    refresh_local_conversation_folder(&mut session, &conversation_id)?;
                     session.set_starred(&conversation_id, starred)?;
                 } else {
                     this.session_for_binding(binding)?
@@ -1928,11 +1635,12 @@ impl MailBackend for Backend {
                         starred,
                     )?;
                 }
-                this.update_cached_conversation(&account_id, &conversation_id, |conversation| {
+                this.update_cached_conversation(&conversation_id, |conversation| {
                     conversation.starred = starred;
                 });
+                return Ok(());
             }
-            Ok(())
+            allow_stub_write(&account_id)
         })
     }
 
@@ -1953,7 +1661,7 @@ impl MailBackend for Backend {
                         crate::integration::camel::AccountSession::open_cached_source(
                             "local", "maildir",
                         )?;
-                    refresh_local_conversation_folder(&mut session, &conversation_id);
+                    refresh_local_conversation_folder(&mut session, &conversation_id)?;
                     session.set_read(&conversation_id, read)?;
                 } else {
                     this.session_for_binding(binding)?
@@ -1966,11 +1674,12 @@ impl MailBackend for Backend {
                         read,
                     )?;
                 }
-                this.update_cached_conversation(&account_id, &conversation_id, |conversation| {
+                this.update_cached_conversation(&conversation_id, |conversation| {
                     conversation.unread_count = if read { 0 } else { 1 };
                 });
+                return Ok(());
             }
-            Ok(())
+            allow_stub_write(&account_id)
         })
     }
 
@@ -1999,7 +1708,7 @@ impl MailBackend for Backend {
                         .lock()
                         .expect("folder cache lock poisoned");
                     folders
-                        .get(&account_id.0)
+                        .as_ref()
                         .and_then(|folders| {
                             folders.iter().find(|folder| {
                                 folder.id == folder_id
@@ -2011,19 +1720,12 @@ impl MailBackend for Backend {
                         })
                         .map(|folder| folder.id.clone())
                 }
-                .ok_or_else(|| {
-                    anyhow!(
-                        "could not resolve destination folder '{}' for {}",
-                        folder_id.0,
-                        binding.account_label
-                    )
-                })?;
+                .ok_or_else(|| anyhow!("could not resolve destination folder '{}'", folder_id.0))?;
                 let summary = cached_conversations
                     .lock()
                     .expect("conversation cache lock poisoned")
-                    .iter()
-                    .filter(|((cached_account_id, _), _)| cached_account_id == &account_id.0)
-                    .flat_map(|(_, conversations)| conversations.iter())
+                    .values()
+                    .flat_map(|conversations| conversations.iter())
                     .find(|conversation| conversation.id == conversation_id)
                     .cloned()
                     .ok_or_else(|| {
@@ -2034,94 +1736,76 @@ impl MailBackend for Backend {
                     })?;
                 this.queue_pending_move(PendingMove {
                     account_id: account_id.clone(),
-                    conversation_id: conversation_id.clone(),
                     destination_folder_id,
                     summary,
                 })?;
                 this.apply_pending_move_overlay(&account_id);
                 return Ok(());
             }
-            Ok(())
+            allow_stub_write(&account_id)
         })
     }
 
     fn save_draft(
         &self,
-        account_id: &MailAccountId,
         draft: &DraftMessage,
-    ) -> BoxFuture<'_, anyhow::Result<Option<MessageDetail>>> {
-        let account_id = account_id.clone();
+    ) -> BoxFuture<'_, anyhow::Result<Option<StoredMessageRef>>> {
+        let account_id = draft.account_id.clone();
         let draft = draft.clone();
         let backend = self.clone();
         Box::pin(async move {
             let Some(binding) = backend.live_binding(&account_id) else {
+                allow_stub_write(&account_id)?;
                 return Ok(None);
             };
             let drafts_folder_uri = binding
                 .drafts_folder
                 .as_deref()
                 .ok_or_else(|| anyhow!("EDS binding has no configured drafts folder"))?;
-            let from = backend.sender_for_draft(&account_id, &draft)?;
-            let detail = append_draft_via_local_eds_cache(drafts_folder_uri, &from, &draft, true)?;
+            let drafts_folder = FolderUri::parse_local(drafts_folder_uri)
+                .map(|uri| FolderId(uri.folder_path().to_string()))
+                .ok_or_else(|| anyhow!("EDS binding has no local Drafts configuration"))?;
+            let detail = append_local_message(&drafts_folder, &draft, true)?;
             {
                 let mut folders = backend
                     .cached_folders
                     .lock()
                     .expect("folder cache lock poisoned")
-                    .get(&account_id.0)
-                    .cloned()
+                    .clone()
                     .unwrap_or_default();
                 let mut conversations = backend
                     .cached_conversations
                     .lock()
                     .expect("conversation cache lock poisoned")
-                    .iter()
-                    .filter(|((cached_account_id, _), _)| cached_account_id == &account_id.0)
-                    .map(|(key, value)| (key.clone(), value.clone()))
-                    .collect::<HashMap<_, _>>();
-                backend.merge_local_drafts_source(
-                    &binding,
-                    &account_id,
-                    &mut folders,
-                    &mut conversations,
-                )?;
-                backend
+                    .clone();
+                backend.merge_local_drafts_source(&binding, &mut folders, &mut conversations)?;
+                *backend
                     .cached_folders
                     .lock()
-                    .expect("folder cache lock poisoned")
-                    .insert(account_id.0.clone(), folders);
-                let mut cache = backend
+                    .expect("folder cache lock poisoned") = Some(folders);
+                *backend
                     .cached_conversations
                     .lock()
-                    .expect("conversation cache lock poisoned");
-                cache.retain(|(cached_account_id, _), _| cached_account_id != &account_id.0);
-                for (key, value) in conversations {
-                    cache.insert(key, value);
-                }
+                    .expect("conversation cache lock poisoned") = conversations;
             }
             Ok(Some(detail))
         })
     }
 
-    fn send_draft(
-        &self,
-        account_id: &MailAccountId,
-        draft: &DraftMessage,
-    ) -> BoxFuture<'_, anyhow::Result<Option<MessageDetail>>> {
+    fn send_draft(&self, draft: &DraftMessage) -> BoxFuture<'_, anyhow::Result<bool>> {
         let backend = self.clone();
-        let account_id = account_id.clone();
+        let account_id = draft.account_id.clone();
         let draft = draft.clone();
         Box::pin(async move {
             if let Some(binding) = backend.live_binding(&account_id) {
-                let outbox_uri =
-                    local_sibling_folder_uri(binding.drafts_folder.as_deref(), "Outbox")
+                let outbox_folder =
+                    local_sibling_folder_id(binding.drafts_folder.as_deref(), "Outbox")
                         .ok_or_else(|| anyhow!("EDS binding has no local Outbox configuration"))?;
-                let from = backend.sender_for_draft(&account_id, &draft)?;
-                return append_draft_via_local_eds_cache(&outbox_uri, &from, &draft, false)
-                    .map(Some);
+                append_local_message(&outbox_folder, &draft, false)?;
+                return Ok(true);
             }
-
-            Ok(None)
+            allow_stub_write(&account_id)?;
+            Ok(false)
         })
     }
 }
@@ -2133,21 +1817,18 @@ fn search_local_mail_cache(
     let Some(drafts_uri) = binding.drafts_folder.as_deref() else {
         return Ok(Vec::new());
     };
-    let Some((source_uid, drafts_folder)) = parse_folder_uri(drafts_uri) else {
+    let Some(drafts_target) = FolderUri::parse_local(drafts_uri) else {
         return Ok(Vec::new());
     };
-    if source_uid != "local" {
-        return Ok(Vec::new());
-    }
 
-    let mut session =
-        crate::integration::camel::AccountSession::open_cached_source(source_uid, "maildir")?;
+    let mut session = crate::integration::camel::AccountSession::open_cached_source(
+        drafts_target.source_uid(),
+        "maildir",
+    )?;
     let mut results = Vec::new();
-    let drafts_folder = FolderId(drafts_folder.to_string());
-    let outbox_folder = local_sibling_folder_uri(Some(drafts_uri), "Outbox")
-        .and_then(|uri| parse_folder_uri(&uri).map(|(_, folder)| FolderId(folder.to_string())));
-    let sent_folder = local_sibling_folder_uri(Some(drafts_uri), "Sent")
-        .and_then(|uri| parse_folder_uri(&uri).map(|(_, folder)| FolderId(folder.to_string())));
+    let drafts_folder = FolderId(drafts_target.folder_path().to_string());
+    let outbox_folder = local_sibling_folder_id(Some(drafts_uri), "Outbox");
+    let sent_folder = local_sibling_folder_id(Some(drafts_uri), "Sent");
 
     for folder in std::iter::once(drafts_folder).chain(outbox_folder) {
         session.ensure_folder_path(&folder)?;
@@ -2186,41 +1867,42 @@ mod tests {
     use std::collections::HashMap;
 
     use super::{
-        Backend, CachedDeliveryPlacement, MailBackend, classify_cached_delivery,
-        conversation_belongs_to_local_collection, local_sibling_folder_uri, replaces_local_draft,
+        Backend, CachedDeliveryPlacement, EdsAccountBinding, MailBackend, classify_cached_delivery,
+        conversation_belongs_to_local_collection, local_sibling_folder_id, replaces_local_draft,
         summary_contains_query,
     };
     use crate::integration::registry::Snapshot;
-    use crate::model::account::{AliasId, MailAccount, MailAccountId, SendingIdentity};
+    use crate::model::account::MailAccountId;
     use crate::model::mail::{
         ConversationId, ConversationSummary, DraftMessage, FolderId, FolderKind, MailFolder,
     };
 
-    fn registry_entry(uid: &str, goa_id: &str) -> crate::integration::registry::Source {
+    fn registry_entry(uid: &str) -> crate::integration::registry::Source {
         crate::integration::registry::Source {
-            object_path: format!("esource:{uid}"),
-            uid: Some(uid.into()),
-            goa_account_id: Some(goa_id.into()),
-            mail_enabled: Some(true),
+            uid: uid.into(),
             ..Default::default()
         }
     }
 
     fn registry_triplet(goa_id: &str, address: &str) -> crate::integration::registry::MailTriplet {
-        let mut account = registry_entry("account-source", goa_id);
+        let mut account = registry_entry("account-source");
+        account.parent = Some("collection-source".into());
         account.backend_name = Some("imapx".into());
-        account.goa_name = Some("GOA Name".into());
-        account.goa_address = Some(address.into());
-        let mut identity = registry_entry("identity-source", goa_id);
+        let mut identity = registry_entry("identity-source");
         identity.identity_name = Some("Mail Identity".into());
         identity.identity_address = Some(address.into());
         identity.identity_reply_to = Some("reply@example.invalid".into());
-        let mut transport = registry_entry("transport-source", goa_id);
+        identity.identity_aliases = Some("Alternate <alternate@example.invalid>".into());
+        let mut transport = registry_entry("transport-source");
         transport.backend_name = Some("smtp".into());
         crate::integration::registry::MailTriplet {
-            account: Some(account),
+            account,
             identity: Some(identity),
             transport: Some(transport),
+            goa_account_id: Some(goa_id.into()),
+            goa_name: Some("GOA Name".into()),
+            goa_address: Some(address.into()),
+            mail_enabled: Some(true),
         }
     }
 
@@ -2228,24 +1910,20 @@ mod tests {
     fn registry_discovery_accepts_only_complete_goa_mail_triplets() {
         let valid = registry_triplet("goa-account", "owner@example.invalid");
         let mut disabled = registry_triplet("disabled", "disabled@example.invalid");
-        disabled.account.as_mut().unwrap().mail_enabled = Some(false);
+        disabled.mail_enabled = Some(false);
         let mut non_goa = registry_triplet("temporary", "local@example.invalid");
-        for entry in [
-            non_goa.account.as_mut().unwrap(),
-            non_goa.identity.as_mut().unwrap(),
-            non_goa.transport.as_mut().unwrap(),
-        ] {
-            entry.goa_account_id = None;
-        }
+        non_goa.goa_account_id = None;
         let incomplete = crate::integration::registry::MailTriplet {
             transport: None,
             ..registry_triplet("incomplete", "incomplete@example.invalid")
         };
         let mut missing_backend = registry_triplet("missing-backend", "backend@example.invalid");
         missing_backend.transport.as_mut().unwrap().backend_name = None;
+        let mut missing_parent = registry_triplet("missing-parent", "parent@example.invalid");
+        missing_parent.account.parent = None;
         let missing_address = registry_triplet("missing-address", "   ");
         let mut partially_linked = registry_triplet("partially-linked", "partial@example.invalid");
-        partially_linked.identity.as_mut().unwrap().goa_account_id = None;
+        partially_linked.goa_account_id = None;
         let snapshot = Snapshot {
             triplets: vec![
                 valid,
@@ -2253,23 +1931,32 @@ mod tests {
                 non_goa,
                 incomplete,
                 missing_backend,
+                missing_parent,
                 missing_address,
                 partially_linked,
             ],
             ..Default::default()
         };
 
-        let accounts = super::accounts_from_registry(&snapshot);
+        let catalog = super::catalog_from_registry(&snapshot);
+        let accounts = &catalog.accounts;
 
         assert_eq!(accounts.len(), 1);
+        assert_eq!(catalog.bindings.len(), 1);
+        assert_eq!(catalog.bindings[0].account_id, accounts[0].id);
         assert_eq!(accounts[0].id.0, "goa-account");
         assert_eq!(accounts[0].display_name, "Mail Identity");
-        assert_eq!(accounts[0].primary_address, "owner@example.invalid");
+        assert_eq!(
+            accounts[0].primary_identity().unwrap().address,
+            "owner@example.invalid"
+        );
         assert_eq!(accounts[0].aliases[0].id.0, "goa-account:primary");
         assert_eq!(
             accounts[0].aliases[0].reply_to.as_deref(),
             Some("reply@example.invalid")
         );
+        assert_eq!(accounts[0].aliases.len(), 2);
+        assert_eq!(accounts[0].aliases[1].address, "alternate@example.invalid");
     }
 
     #[test]
@@ -2277,118 +1964,159 @@ mod tests {
         let first = registry_triplet("same-account", "first@example.invalid");
         let duplicate = registry_triplet("same-account", "second@example.invalid");
         let mut conflicting = registry_triplet("conflicting", "third@example.invalid");
-        conflicting.transport.as_mut().unwrap().goa_account_id = Some("different-account".into());
+        conflicting.goa_account_id = None;
         let snapshot = Snapshot {
             triplets: vec![first, duplicate, conflicting],
             ..Default::default()
         };
 
-        let accounts = super::accounts_from_registry(&snapshot);
+        let accounts = super::catalog_from_registry(&snapshot).accounts;
 
         assert_eq!(accounts.len(), 1);
         assert_eq!(accounts[0].id.0, "same-account");
-        assert_eq!(accounts[0].primary_address, "first@example.invalid");
+        assert_eq!(
+            accounts[0].primary_identity().unwrap().address,
+            "first@example.invalid"
+        );
     }
 
     #[test]
     fn registry_binding_skips_an_incomplete_duplicate_of_a_discovered_account() {
         let valid = registry_triplet("same-account", "owner@example.invalid");
         let mut incomplete = valid.clone();
-        incomplete.account.as_mut().unwrap().uid = Some("stale-account-source".into());
+        incomplete.account.uid = "stale-account-source".into();
         incomplete.transport.as_mut().unwrap().backend_name = None;
+        let mut malformed = valid.clone();
+        malformed.account.uid = "malformed-account-source".into();
+        malformed.identity.as_mut().unwrap().identity_address = Some("   ".into());
         let snapshot = Snapshot {
-            triplets: vec![incomplete, valid],
+            triplets: vec![incomplete, malformed, valid],
             ..Default::default()
         };
-        let accounts = super::accounts_from_registry(&snapshot);
+        let catalog = super::catalog_from_registry(&snapshot);
 
-        let bindings = super::bind_accounts_to_triplets(&accounts, &snapshot);
-
-        assert_eq!(bindings.len(), 1);
-        assert_eq!(bindings[0].account_uid.as_deref(), Some("account-source"));
-        assert_eq!(bindings[0].transport_backend_name.as_deref(), Some("smtp"));
+        assert_eq!(catalog.accounts.len(), 1);
+        assert_eq!(catalog.bindings.len(), 1);
+        assert_eq!(catalog.bindings[0].account_uid, "account-source");
+        assert_eq!(catalog.bindings[0].transport_backend_name, "smtp");
     }
 
     #[test]
     fn stub_writes_always_succeed_without_changing_the_stub() {
-        let stale_account_id = MailAccountId("account-one".into());
-        let stale_account = MailAccount {
-            id: stale_account_id.clone(),
-            display_name: "Example Account".into(),
-            primary_address: "primary@example.invalid".into(),
-            aliases: vec![SendingIdentity::with_id(
-                AliasId("operations".into()),
-                "operations@example.invalid".into(),
-                "Operations".into(),
-                None,
-                String::new(),
-                String::new(),
-                true,
-            )],
-        };
-        let backend = Backend::from_accounts(&[stale_account], Vec::new());
-        let local_stub = Backend::from_accounts(&[], Vec::new());
-        let local_stub_id = crate::integration::stub::stub_account().id;
-        let stale_folders = futures::executor::block_on(backend.list_folders(&stale_account_id))
-            .expect("an account whose EDS source disappeared should expose the stub folders");
-        let local_folders = futures::executor::block_on(local_stub.list_folders(&local_stub_id))
-            .expect("no-account mode should expose the stub folders");
-        assert_eq!(
-            stale_folders
-                .iter()
-                .map(|folder| &folder.id)
-                .collect::<Vec<_>>(),
-            local_folders
-                .iter()
-                .map(|folder| &folder.id)
-                .collect::<Vec<_>>()
-        );
-        assert_eq!(
-            futures::executor::block_on(backend.list_conversations(
-                &stale_account_id,
-                &FolderId("inbox".into()),
-                0,
-                0,
-            ))
-            .expect("an account whose EDS source disappeared should expose stub messages"),
-            futures::executor::block_on(local_stub.list_conversations(
-                &local_stub_id,
-                &FolderId("inbox".into()),
-                0,
-                0,
-            ))
-            .expect("no-account mode should expose the stub messages")
-        );
+        let backend = Backend::new(None);
+        let stub_account_id = crate::integration::stub::stub_account().id;
         let unknown_message = ConversationId("not-a-stub-message".into());
         let before = backend.stub_store.conversations(&FolderId("inbox".into()));
 
-        futures::executor::block_on(backend.set_starred(&stale_account_id, &unknown_message, true))
+        futures::executor::block_on(backend.set_starred(&stub_account_id, &unknown_message, true))
             .expect("stub star writes should be accepted");
-        futures::executor::block_on(backend.set_read(&stale_account_id, &unknown_message, true))
+        futures::executor::block_on(backend.set_read(&stub_account_id, &unknown_message, true))
             .expect("stub read writes should be accepted");
         futures::executor::block_on(backend.move_to_folder(
-            &stale_account_id,
+            &stub_account_id,
             &unknown_message,
             &FolderId("trash".into()),
         ))
         .expect("stub moves should be accepted");
 
-        let draft = DraftMessage::empty(stale_account_id.clone(), AliasId("unknown".into()));
+        let draft = DraftMessage::empty(stub_account_id, "Sender <sender@example.invalid>".into());
         assert!(
-            futures::executor::block_on(backend.save_draft(&stale_account_id, &draft))
+            futures::executor::block_on(backend.save_draft(&draft))
                 .expect("stub draft saves should be accepted")
                 .is_none()
         );
         assert!(
-            futures::executor::block_on(backend.send_draft(&stale_account_id, &draft))
+            !futures::executor::block_on(backend.send_draft(&draft))
                 .expect("stub sends should be accepted")
-                .is_none()
         );
 
         let store = &backend.stub_store;
         assert_eq!(store.conversations(&FolderId("inbox".into())), before);
         assert!(store.conversations(&FolderId("drafts".into())).is_empty());
         assert!(store.conversations(&FolderId("sent".into())).is_empty());
+    }
+
+    #[test]
+    fn non_stub_writes_are_rejected_without_a_mail_cache() {
+        let backend = Backend::new(None);
+        let account_id = MailAccountId("unavailable-account".into());
+        let conversation_id = ConversationId("unavailable-conversation".into());
+        let folder_id = FolderId("trash".into());
+        let draft =
+            DraftMessage::empty(account_id.clone(), "Sender <sender@example.invalid>".into());
+
+        assert!(
+            futures::executor::block_on(backend.set_starred(&account_id, &conversation_id, true,))
+                .is_err()
+        );
+        assert!(
+            futures::executor::block_on(backend.set_read(&account_id, &conversation_id, true,))
+                .is_err()
+        );
+        assert!(
+            futures::executor::block_on(backend.move_to_folder(
+                &account_id,
+                &conversation_id,
+                &folder_id,
+            ))
+            .is_err()
+        );
+        assert!(futures::executor::block_on(backend.save_draft(&draft)).is_err());
+        assert!(futures::executor::block_on(backend.send_draft(&draft)).is_err());
+    }
+
+    #[test]
+    fn instance_cache_is_never_exposed_for_a_different_account() {
+        let backend = Backend::new(Some(EdsAccountBinding {
+            account_id: MailAccountId("bound-account".into()),
+            account_uid: "account-source".into(),
+            account_parent_uid: "collection-source".into(),
+            account_backend_name: "imapx".into(),
+            account_auth_method: None,
+            identity_uid: "identity-source".into(),
+            transport_uid: "transport-source".into(),
+            transport_backend_name: "smtp".into(),
+            transport_auth_method: None,
+            drafts_folder: None,
+            sent_folder: None,
+        }));
+        *backend.cached_folders.lock().unwrap() = Some(vec![MailFolder {
+            id: FolderId("private".into()),
+            name: "Private cache".into(),
+            unread_count: 0,
+            kind: FolderKind::Custom,
+        }]);
+        backend.cached_conversations.lock().unwrap().insert(
+            "inbox".into(),
+            vec![ConversationSummary {
+                id: ConversationId("inbox\u{1f}private".into()),
+                subject: "Private cache".into(),
+                participants: Vec::new(),
+                message_count: 1,
+                unread_count: 0,
+                attachment_count: 0,
+                starred: false,
+                last_updated_unix_ms: 0,
+                preview: String::new(),
+            }],
+        );
+
+        let other_account = MailAccountId("other-account".into());
+        let folders = futures::executor::block_on(backend.list_folders(&other_account)).unwrap();
+        let conversations = futures::executor::block_on(backend.list_conversations(
+            &other_account,
+            &FolderId("inbox".into()),
+            0,
+            0,
+        ))
+        .unwrap();
+
+        assert!(!folders.iter().any(|folder| folder.id.0 == "private"));
+        assert!(
+            conversations
+                .iter()
+                .all(|summary| summary.subject != "Private cache")
+        );
     }
 
     #[test]
@@ -2412,10 +2140,8 @@ mod tests {
     }
 
     #[test]
-    fn cached_summary_updates_are_account_scoped_and_refresh_folder_counts() {
-        let backend = Backend::from_accounts(&[], Vec::new());
-        let first_account = MailAccountId("account-1".into());
-        let second_account = MailAccountId("account-2".into());
+    fn cached_summary_updates_refresh_the_instance_folder_counts() {
+        let backend = Backend::new(None);
         let folder_id = FolderId("inbox".into());
         let conversation_id = ConversationId("inbox\u{1f}message-1".into());
         let summary = ConversationSummary {
@@ -2435,45 +2161,29 @@ mod tests {
             unread_count: 1,
             kind: FolderKind::Inbox,
         };
-        backend.cached_folders.lock().unwrap().extend([
-            (first_account.0.clone(), vec![folder.clone()]),
-            (second_account.0.clone(), vec![folder]),
-        ]);
-        backend.cached_conversations.lock().unwrap().extend([
-            (
-                (first_account.0.clone(), folder_id.0.clone()),
-                vec![summary.clone()],
-            ),
-            (
-                (second_account.0.clone(), folder_id.0.clone()),
-                vec![summary],
-            ),
-        ]);
+        *backend.cached_folders.lock().unwrap() = Some(vec![folder]);
+        backend
+            .cached_conversations
+            .lock()
+            .unwrap()
+            .insert(folder_id.0.clone(), vec![summary]);
 
-        backend.update_cached_conversation(&first_account, &conversation_id, |conversation| {
+        backend.update_cached_conversation(&conversation_id, |conversation| {
             conversation.unread_count = 0
         });
 
         let folders = backend.cached_folders.lock().unwrap();
-        assert_eq!(folders[&first_account.0][0].unread_count, 0);
-        assert_eq!(folders[&second_account.0][0].unread_count, 1);
+        assert_eq!(folders.as_ref().unwrap()[0].unread_count, 0);
         drop(folders);
         let conversations = backend.cached_conversations.lock().unwrap();
-        assert_eq!(
-            conversations[&(first_account.0, folder_id.0.clone())][0].unread_count,
-            0
-        );
-        assert_eq!(
-            conversations[&(second_account.0, folder_id.0)][0].unread_count,
-            1
-        );
+        assert_eq!(conversations[&folder_id.0][0].unread_count, 0);
     }
 
     #[test]
     fn local_outbox_is_a_sibling_of_nested_identity_folders() {
         assert_eq!(
-            local_sibling_folder_uri(Some("folder://local/account-1/Drafts"), "Outbox"),
-            Some("folder://local/account-1/Outbox".into())
+            local_sibling_folder_id(Some("folder://local/account-1/Drafts"), "Outbox"),
+            Some(FolderId("account-1/Outbox".into()))
         );
     }
 
@@ -2504,19 +2214,19 @@ mod tests {
     #[test]
     fn local_sibling_supports_a_top_level_folder() {
         assert_eq!(
-            local_sibling_folder_uri(Some("folder://local/Drafts"), "Outbox"),
-            Some("folder://local/Outbox".into())
+            local_sibling_folder_id(Some("folder://local/Drafts"), "Outbox"),
+            Some(FolderId("Outbox".into()))
         );
     }
 
     #[test]
     fn local_sibling_rejects_remote_and_malformed_uris() {
         assert_eq!(
-            local_sibling_folder_uri(Some("folder://microsoft365/Drafts"), "Outbox"),
+            local_sibling_folder_id(Some("folder://microsoft365/Drafts"), "Outbox"),
             None
         );
-        assert_eq!(local_sibling_folder_uri(Some("Drafts"), "Outbox"), None);
-        assert_eq!(local_sibling_folder_uri(None, "Outbox"), None);
+        assert_eq!(local_sibling_folder_id(Some("Drafts"), "Outbox"), None);
+        assert_eq!(local_sibling_folder_id(None, "Outbox"), None);
     }
 
     #[test]

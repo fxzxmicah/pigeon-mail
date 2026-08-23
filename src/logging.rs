@@ -43,7 +43,7 @@ fn report_development_detail(operation: &'static str, error: &impl std::fmt::Dis
 }
 
 #[cfg(not(debug_assertions))]
-fn report_development_detail(_operation: &'static str, _error: &impl std::fmt::Display) {}
+fn report_development_detail(_: &'static str, _: &impl std::fmt::Display) {}
 
 fn error_category(error: &impl std::fmt::Display) -> &'static str {
     match crate::failure::classify_failure_message(error) {

@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::model::account::{AliasId, MailAccountId};
+use crate::model::account::MailAccountId;
 
 #[cfg(debug_assertions)]
 pub(crate) const CONVERSATION_PAGE_SIZE: usize = 7;
@@ -164,8 +164,6 @@ pub struct DraftMessage {
     pub conversation_id: Option<ConversationId>,
     pub message_id: Option<MessageId>,
     pub account_id: MailAccountId,
-    pub alias_id: AliasId,
-    #[serde(default)]
     pub from: String,
     pub reply_to: Option<String>,
     pub to: Vec<String>,
@@ -175,6 +173,21 @@ pub struct DraftMessage {
     pub attachments: Vec<AttachmentInfo>,
     pub html_body: String,
     pub text_body: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredMessageRef {
+    pub conversation_id: ConversationId,
+    pub message_id: MessageId,
+}
+
+impl From<&MessageDetail> for StoredMessageRef {
+    fn from(detail: &MessageDetail) -> Self {
+        Self {
+            conversation_id: detail.conversation_id.clone(),
+            message_id: detail.message_id.clone(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -197,13 +210,12 @@ impl MailtoRequest {
 }
 
 impl DraftMessage {
-    pub fn empty(account_id: MailAccountId, alias_id: AliasId) -> Self {
+    pub fn empty(account_id: MailAccountId, from: String) -> Self {
         Self {
             conversation_id: None,
             message_id: None,
             account_id,
-            alias_id,
-            from: String::new(),
+            from,
             reply_to: None,
             to: Vec::new(),
             cc: Vec::new(),

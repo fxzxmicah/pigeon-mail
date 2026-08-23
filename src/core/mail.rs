@@ -1,8 +1,8 @@
 use crate::integration::backend::{EdsAccountBinding, SharedMailBackend};
-use crate::model::account::{MailAccount, MailAccountId};
+use crate::model::account::MailAccountId;
 use crate::model::mail::{
     ConversationId, ConversationSummary, DraftMessage, FolderId, MailFolder, MailboxMode,
-    MessageDetail,
+    MessageDetail, StoredMessageRef,
 };
 
 #[derive(Clone)]
@@ -23,8 +23,11 @@ impl MailService {
         self.backend.eds_binding(account_id)
     }
 
-    pub async fn activate_account(&self, account: &MailAccount) -> anyhow::Result<MailboxMode> {
-        self.backend.activate_account(account).await
+    pub async fn activate_account(
+        &self,
+        account_id: &MailAccountId,
+    ) -> anyhow::Result<MailboxMode> {
+        self.backend.activate_account(account_id).await
     }
 
     pub async fn list_folders(
@@ -114,17 +117,12 @@ impl MailService {
 
     pub async fn save_draft(
         &self,
-        account_id: &MailAccountId,
         draft: &DraftMessage,
-    ) -> anyhow::Result<Option<MessageDetail>> {
-        self.backend.save_draft(account_id, draft).await
+    ) -> anyhow::Result<Option<StoredMessageRef>> {
+        self.backend.save_draft(draft).await
     }
 
-    pub async fn send_draft(
-        &self,
-        account_id: &MailAccountId,
-        draft: &DraftMessage,
-    ) -> anyhow::Result<Option<MessageDetail>> {
-        self.backend.send_draft(account_id, draft).await
+    pub async fn send_draft(&self, draft: &DraftMessage) -> anyhow::Result<bool> {
+        self.backend.send_draft(draft).await
     }
 }

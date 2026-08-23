@@ -6,10 +6,10 @@ use futures::future::BoxFuture;
 
 use super::{EdsAccountBinding, MailBackend, SharedMailBackend, select_mail_backend};
 use crate::integration::journal::PendingMailActionStore;
-use crate::model::account::{MailAccount, MailAccountId};
+use crate::model::account::MailAccountId;
 use crate::model::mail::{
     ConversationId, ConversationSummary, DraftMessage, FolderId, MailFolder, MailboxMode,
-    MessageDetail,
+    MessageDetail, StoredMessageRef,
 };
 
 #[derive(Clone)]
@@ -55,6 +55,26 @@ impl BackendPool {
             .map(|entry| entry.backend.clone())
             .ok_or_else(|| anyhow!("mail account '{}' is still activating", account_id.0))
     }
+
+    fn activated_backend(
+        &self,
+        account_id: &MailAccountId,
+    ) -> anyhow::Result<Option<ActivatedBackend>> {
+        let slot = self
+            .accounts
+            .lock()
+            .map_err(|_| anyhow!("account backend pool lock poisoned"))?
+            .get(account_id)
+            .cloned();
+        let Some(slot) = slot else {
+            return Ok(None);
+        };
+        let activated = slot
+            .lock()
+            .map_err(|_| anyhow!("account backend slot lock poisoned"))?
+            .clone();
+        Ok(activated)
+    }
 }
 
 pub fn lazy_mail_backend() -> SharedMailBackend {
@@ -64,17 +84,27 @@ pub fn lazy_mail_backend() -> SharedMailBackend {
 impl MailBackend for BackendPool {
     fn activate_account(
         &self,
-        account: &MailAccount,
+        account_id: &MailAccountId,
     ) -> BoxFuture<'_, anyhow::Result<MailboxMode>> {
-        let account = account.clone();
+        let account_id = account_id.clone();
         Box::pin(async move {
+            if let Some(active) = self.activated_backend(&account_id)? {
+                return Ok(active.mode);
+            }
+            let binding = self
+                .available_bindings
+                .lock()
+                .map_err(|_| anyhow!("available account binding lock poisoned"))?
+                .get(&account_id)
+                .cloned()
+                .ok_or_else(|| anyhow!("mail account '{}' is unavailable", account_id.0))?;
             let slot = {
                 let mut accounts = self
                     .accounts
                     .lock()
                     .map_err(|_| anyhow!("account backend pool lock poisoned"))?;
                 accounts
-                    .entry(account.id.clone())
+                    .entry(account_id.clone())
                     .or_insert_with(|| Arc::new(Mutex::new(None)))
                     .clone()
             };
@@ -85,17 +115,7 @@ impl MailBackend for BackendPool {
                 return Ok(active.mode);
             }
 
-            let binding = self
-                .available_bindings
-                .lock()
-                .map_err(|_| anyhow!("available account binding lock poisoned"))?
-                .get(&account.id)
-                .cloned();
-            let selection = select_mail_backend(
-                std::slice::from_ref(&account),
-                binding.into_iter().collect(),
-                self.pending_mail_actions.clone(),
-            );
+            let selection = select_mail_backend(binding, self.pending_mail_actions.clone());
             let mode = selection.mode;
             *active = Some(ActivatedBackend {
                 backend: selection.backend,
@@ -105,22 +125,28 @@ impl MailBackend for BackendPool {
         })
     }
 
-    fn invalidate_account(&self, account_id: &MailAccountId) {
-        self.accounts
-            .lock()
-            .expect("account backend pool lock poisoned")
-            .remove(account_id);
-    }
-
-    fn replace_available_bindings(&self, bindings: &[EdsAccountBinding]) {
-        *self
-            .available_bindings
-            .lock()
-            .expect("available account binding lock poisoned") = bindings
+    fn update_binding_catalog(
+        &self,
+        bindings: &[EdsAccountBinding],
+        invalidated_accounts: &[MailAccountId],
+    ) {
+        let catalog = bindings
             .iter()
             .cloned()
-            .map(|binding| (MailAccountId(binding.account_id.clone()), binding))
+            .map(|binding| (binding.account_id.clone(), binding))
             .collect();
+        let mut available_bindings = self
+            .available_bindings
+            .lock()
+            .expect("available account binding lock poisoned");
+        let mut accounts = self
+            .accounts
+            .lock()
+            .expect("account backend pool lock poisoned");
+        *available_bindings = catalog;
+        for account_id in invalidated_accounts {
+            accounts.remove(account_id);
+        }
     }
 
     fn eds_binding(&self, account_id: &MailAccountId) -> Option<EdsAccountBinding> {
@@ -261,123 +287,121 @@ impl MailBackend for BackendPool {
 
     fn save_draft(
         &self,
-        account_id: &MailAccountId,
         draft: &DraftMessage,
-    ) -> BoxFuture<'_, anyhow::Result<Option<MessageDetail>>> {
-        let backend = self.backend(account_id);
-        let account_id = account_id.clone();
+    ) -> BoxFuture<'_, anyhow::Result<Option<StoredMessageRef>>> {
+        let backend = self.backend(&draft.account_id);
         let draft = draft.clone();
-        Box::pin(async move { backend?.save_draft(&account_id, &draft).await })
+        Box::pin(async move { backend?.save_draft(&draft).await })
     }
 
-    fn send_draft(
-        &self,
-        account_id: &MailAccountId,
-        draft: &DraftMessage,
-    ) -> BoxFuture<'_, anyhow::Result<Option<MessageDetail>>> {
-        let backend = self.backend(account_id);
-        let account_id = account_id.clone();
+    fn send_draft(&self, draft: &DraftMessage) -> BoxFuture<'_, anyhow::Result<bool>> {
+        let backend = self.backend(&draft.account_id);
         let draft = draft.clone();
-        Box::pin(async move { backend?.send_draft(&account_id, &draft).await })
+        Box::pin(async move { backend?.send_draft(&draft).await })
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
 
-    use super::BackendPool;
-    use crate::integration::backend::{EdsAccountBinding, MailBackend};
+    use super::{ActivatedBackend, BackendPool};
+    use crate::integration::backend::{EdsAccountBinding, MailBackend, stub_backend};
     use crate::integration::journal::PendingMailActionStore;
-    use crate::model::account::{MailAccount, MailAccountId};
+    use crate::model::account::MailAccountId;
     use crate::model::mail::MailboxMode;
 
     #[test]
-    fn reuses_activated_accounts_and_updates_only_the_inactive_binding_catalog() {
-        let active = account("active-account");
-        let half_active = account("half-active-account");
-        let inactive = account("inactive-account");
-        let pending_actions = PendingMailActionStore::open(
+    fn unknown_accounts_are_not_materialized_as_stub_backends() {
+        let unknown = MailAccountId("unknown-account".into());
+        let pool = BackendPool::with_pending_actions(test_pending_actions());
+
+        assert!(futures::executor::block_on(pool.activate_account(&unknown)).is_err());
+        assert!(pool.accounts.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn catalog_changes_preserve_half_active_backends_until_explicit_invalidation() {
+        let active = MailAccountId("active-account".into());
+        let half_active = MailAccountId("half-active-account".into());
+        let inactive = MailAccountId("inactive-account".into());
+        let pool = BackendPool::with_pending_actions(test_pending_actions());
+        let active_backend = install_activated_stub(&pool, active.clone());
+        let half_active_backend = install_activated_stub(&pool, half_active.clone());
+        pool.update_binding_catalog(&[binding("inactive-account")], &[]);
+        assert!(!Arc::ptr_eq(&active_backend, &half_active_backend));
+        assert_eq!(
+            futures::executor::block_on(pool.activate_account(&active)).unwrap(),
+            MailboxMode::StubUnavailable
+        );
+        assert!(Arc::ptr_eq(
+            &active_backend,
+            &pool.backend(&active).unwrap()
+        ));
+        assert!(futures::executor::block_on(pool.list_folders(&inactive)).is_err());
+        assert_eq!(pool.accounts.lock().unwrap().len(), 2);
+        assert!(
+            pool.available_bindings
+                .lock()
+                .unwrap()
+                .contains_key(&inactive)
+        );
+
+        pool.update_binding_catalog(&[], &[]);
+        assert_eq!(
+            futures::executor::block_on(pool.activate_account(&half_active)).unwrap(),
+            MailboxMode::StubUnavailable
+        );
+        assert!(Arc::ptr_eq(
+            &half_active_backend,
+            &pool.backend(&half_active).unwrap()
+        ));
+
+        pool.update_binding_catalog(&[], std::slice::from_ref(&half_active));
+        assert!(futures::executor::block_on(pool.activate_account(&half_active)).is_err());
+        assert!(Arc::ptr_eq(
+            &active_backend,
+            &pool.backend(&active).unwrap()
+        ));
+        assert_eq!(pool.accounts.lock().unwrap().len(), 1);
+    }
+
+    fn test_pending_actions() -> PendingMailActionStore {
+        PendingMailActionStore::open(
             std::env::temp_dir()
                 .join(format!(
                     "mail-backend-pool-test-{}",
                     glib::uuid_string_random()
                 ))
                 .join("pending-mail-actions.json"),
-        );
-        let pool = BackendPool::with_pending_actions(pending_actions);
-        pool.replace_available_bindings(&[
-            binding("active-account"),
-            binding("half-active-account"),
-        ]);
-
-        assert_eq!(
-            futures::executor::block_on(pool.activate_account(&active)).unwrap(),
-            MailboxMode::Live
-        );
-        assert_eq!(
-            futures::executor::block_on(pool.activate_account(&half_active)).unwrap(),
-            MailboxMode::Live
-        );
-        let active_backend = pool.backend(&active.id).unwrap();
-        let half_active_backend = pool.backend(&half_active.id).unwrap();
-        assert!(!Arc::ptr_eq(&active_backend, &half_active_backend));
-        assert_eq!(
-            futures::executor::block_on(pool.activate_account(&active)).unwrap(),
-            MailboxMode::Live
-        );
-        assert!(Arc::ptr_eq(
-            &active_backend,
-            &pool.backend(&active.id).unwrap()
-        ));
-        assert!(futures::executor::block_on(pool.list_folders(&inactive.id)).is_err());
-        assert_eq!(pool.accounts.lock().unwrap().len(), 2);
-
-        pool.replace_available_bindings(&[]);
-        assert_eq!(
-            futures::executor::block_on(pool.activate_account(&half_active)).unwrap(),
-            MailboxMode::Live
-        );
-        assert!(Arc::ptr_eq(
-            &half_active_backend,
-            &pool.backend(&half_active.id).unwrap()
-        ));
-
-        pool.invalidate_account(&half_active.id);
-        assert_eq!(
-            futures::executor::block_on(pool.activate_account(&half_active)).unwrap(),
-            MailboxMode::StubUnavailable
-        );
-        assert!(Arc::ptr_eq(
-            &active_backend,
-            &pool.backend(&active.id).unwrap()
-        ));
-        assert_eq!(pool.accounts.lock().unwrap().len(), 2);
+        )
     }
 
-    fn account(id: &str) -> MailAccount {
-        MailAccount {
-            id: MailAccountId(id.into()),
-            display_name: format!("{id} display"),
-            primary_address: format!("{id}@example.com"),
-            aliases: Vec::new(),
-        }
+    fn install_activated_stub(
+        pool: &BackendPool,
+        account_id: MailAccountId,
+    ) -> crate::integration::backend::SharedMailBackend {
+        let backend = stub_backend();
+        pool.accounts.lock().unwrap().insert(
+            account_id,
+            Arc::new(Mutex::new(Some(ActivatedBackend {
+                backend: backend.clone(),
+                mode: MailboxMode::StubUnavailable,
+            }))),
+        );
+        backend
     }
 
     fn binding(id: &str) -> EdsAccountBinding {
         EdsAccountBinding {
-            account_id: id.into(),
-            account_label: format!("{id} display"),
-            account_uid: Some(format!("{id}-source")),
-            account_parent_uid: None,
-            account_backend_name: Some("test".into()),
+            account_id: MailAccountId(id.into()),
+            account_uid: format!("{id}-source"),
+            account_parent_uid: format!("{id}-collection"),
+            account_backend_name: "test".into(),
             account_auth_method: None,
-            identity_uid: None,
-            identity_name: None,
-            identity_reply_to: None,
-            identity_aliases: None,
-            transport_uid: Some(format!("{id}-transport")),
-            transport_backend_name: Some("test".into()),
+            identity_uid: format!("{id}-identity"),
+            transport_uid: format!("{id}-transport"),
+            transport_backend_name: "test".into(),
             transport_auth_method: None,
             drafts_folder: None,
             sent_folder: None,

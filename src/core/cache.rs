@@ -5,10 +5,10 @@ use std::sync::{Arc, Mutex, Weak, mpsc};
 use crate::core::mail::MailService;
 use crate::integration::backend::EdsAccountBinding;
 use crate::integration::camel::ChangeMonitor;
-use crate::model::account::{MailAccount, MailAccountId};
+use crate::model::account::MailAccountId;
 use crate::model::event::{
-    AccountMailboxSnapshot, AttachmentDisposition, CacheEvent, ComposeOperation,
-    MailboxContentSnapshot, MessageAction,
+    AccountMailboxSnapshot, AttachmentDisposition, CacheEvent, MailboxContentSnapshot,
+    MessageAction,
 };
 use crate::model::mail::{ConversationId, ConversationSummary, DraftMessage, FolderId};
 
@@ -32,7 +32,7 @@ struct CacheManagerState {
     change_monitor: Mutex<ChangeMonitorState>,
 }
 
-pub struct AccountRefresh {
+struct AccountRefresh {
     manager: CacheManager,
     account_id: Option<MailAccountId>,
 }
@@ -169,14 +169,13 @@ impl CacheManager {
         &self,
         mail_service: MailService,
         request_id: u64,
-        account: MailAccount,
+        account_id: MailAccountId,
         conversation_limit: usize,
     ) {
-        self.set_fully_active_account(Some(account.id.clone()));
+        self.set_fully_active_account(Some(account_id.clone()));
         let manager = self.clone();
         std::thread::spawn(move || {
-            let account_id = account.id.clone();
-            let result = futures::executor::block_on(mail_service.activate_account(&account))
+            let result = futures::executor::block_on(mail_service.activate_account(&account_id))
                 .and_then(|mode| {
                     futures::executor::block_on(async {
                         let folders = mail_service.list_folders(&account_id).await?;
@@ -325,7 +324,7 @@ impl CacheManager {
             state.starting = false;
             state.monitor = match result {
                 Ok(monitor) => Some(monitor),
-                Err(_error) => {
+                Err(error) => {
                     tracing::debug!(
                         target: "pigeon::eds",
                         "active account change monitor unavailable"
@@ -333,9 +332,10 @@ impl CacheManager {
                     #[cfg(debug_assertions)]
                     tracing::debug!(
                         target: "pigeon::development::eds",
-                        error = %_error,
+                        error = %error,
                         "change monitor setup failed"
                     );
+                    drop(error);
                     None
                 }
             };
@@ -555,22 +555,21 @@ impl CacheManager {
 
     pub fn request_attachment(
         &self,
-        request: Option<(MailService, MailAccountId, ConversationId, String)>,
+        request: Option<(MailService, MailAccountId, ConversationId)>,
         disposition: AttachmentDisposition,
         display_name: String,
         source_uri: String,
     ) -> bool {
-        let Some((mail_service, account_id, conversation_id, request_uri)) = request else {
-            if source_uri.contains("://") && !source_uri.starts_with("pigeon-eds-attachment:") {
-                self.publish(CacheEvent::attachment_prepared(
-                    disposition,
-                    display_name,
-                    source_uri,
-                    Ok(None),
-                ));
-                return true;
-            }
-            return false;
+        let Some((mail_service, account_id, conversation_id)) = request else {
+            let Ok(uri) = resolve_attachment_uri(None, source_uri) else {
+                return false;
+            };
+            self.publish(CacheEvent::attachment_prepared(
+                disposition,
+                display_name,
+                Ok(uri),
+            ));
+            return true;
         };
 
         let manager = self.clone();
@@ -578,16 +577,16 @@ impl CacheManager {
             let result = futures::executor::block_on(mail_service.open_attachment(
                 &account_id,
                 &conversation_id,
-                &request_uri,
+                &source_uri,
             ))
             .map_err(|error| {
                 crate::logging::report_failure("attachment-prepare", &error);
                 "Attachment unavailable.".to_string()
-            });
+            })
+            .and_then(|prepared_uri| resolve_attachment_uri(prepared_uri, source_uri));
             manager.publish(CacheEvent::attachment_prepared(
                 disposition,
                 display_name,
-                source_uri,
                 result,
             ));
         });
@@ -610,10 +609,8 @@ impl CacheManager {
                             .set_starred(&account_id, &conversation_id, *starred)
                             .await
                     }
-                    MessageAction::SetUnread(unread) => {
-                        service
-                            .set_read(&account_id, &conversation_id, !unread)
-                            .await
+                    MessageAction::SetRead(read) => {
+                        service.set_read(&account_id, &conversation_id, *read).await
                     }
                     MessageAction::MoveTo(folder_id) => {
                         service
@@ -643,16 +640,12 @@ impl CacheManager {
         let manager = self.clone();
         std::thread::spawn(move || {
             let account_id = draft.account_id.clone();
-            let result = futures::executor::block_on(service.save_draft(&account_id, &draft))
-                .map_err(|error| {
-                    crate::logging::report_failure("draft-cache-save", &error);
-                    "Draft not saved.".to_string()
-                });
+            let result = futures::executor::block_on(service.save_draft(&draft)).map_err(|error| {
+                crate::logging::report_failure("draft-cache-save", &error);
+                "Draft not saved.".to_string()
+            });
             let locally_saved = matches!(&result, Ok(Some(_)));
-            manager.publish(CacheEvent::compose_operation(
-                ComposeOperation::SaveDraft,
-                result,
-            ));
+            manager.publish(CacheEvent::draft_saved(result));
             if locally_saved {
                 manager.publish(CacheEvent::mailbox_changed(account_id.clone()));
                 manager.request_account_refresh(account_id, service);
@@ -664,16 +657,12 @@ impl CacheManager {
         let manager = self.clone();
         std::thread::spawn(move || {
             let account_id = draft.account_id.clone();
-            let result = futures::executor::block_on(service.send_draft(&account_id, &draft))
-                .map_err(|error| {
-                    crate::logging::report_failure("message-send", &error);
-                    "Message not sent.".to_string()
-                });
-            let locally_queued = matches!(&result, Ok(Some(_)));
-            manager.publish(CacheEvent::compose_operation(
-                ComposeOperation::Send,
-                result,
-            ));
+            let result = futures::executor::block_on(service.send_draft(&draft)).map_err(|error| {
+                crate::logging::report_failure("message-send", &error);
+                "Message not sent.".to_string()
+            });
+            let locally_queued = matches!(&result, Ok(true));
+            manager.publish(CacheEvent::send_completed(result.map(|_| ())));
             if locally_queued {
                 manager.publish(CacheEvent::mailbox_changed(account_id.clone()));
                 manager.request_account_refresh(account_id, service);
@@ -754,6 +743,18 @@ impl CacheManager {
     }
 }
 
+fn resolve_attachment_uri(
+    prepared_uri: Option<String>,
+    source_uri: String,
+) -> Result<String, String> {
+    prepared_uri
+        .or_else(|| {
+            (source_uri.contains("://") && !source_uri.starts_with("pigeon-eds-attachment:"))
+                .then_some(source_uri)
+        })
+        .ok_or_else(|| "Attachment unavailable.".to_string())
+}
+
 impl RemoteChangePublisher {
     fn publish(&self, account_id: &MailAccountId) {
         let Some(state) = self.state.upgrade() else {
@@ -812,7 +813,7 @@ async fn load_notification_snapshot(
 }
 
 impl AccountRefresh {
-    pub fn complete(mut self, failure: Option<crate::model::event::RefreshFailureKind>) {
+    fn complete(mut self, failure: Option<crate::model::event::RefreshFailureKind>) {
         let Some(account_id) = self.account_id.take() else {
             return;
         };
@@ -1250,7 +1251,7 @@ mod tests {
         let manager = CacheManager::new();
         let worker = manager.clone();
         let account_id = MailAccountId("account-1".into());
-        let _refresh = manager
+        let refresh = manager
             .begin_account_refresh(&account_id)
             .expect("refresh should start");
         assert!(worker.begin_account_refresh(&account_id).is_none());
@@ -1265,6 +1266,7 @@ mod tests {
             [CacheEvent::MailboxCacheChanged { account_id }]
                 if account_id.0 == "account-1"
         ));
+        drop(refresh);
     }
 
     #[test]
@@ -1324,9 +1326,8 @@ mod tests {
             [CacheEvent::AttachmentPrepared {
                 disposition: AttachmentDisposition::Open,
                 display_name,
-                source_uri,
-                result: Ok(None),
-            }] if display_name == "report.pdf" && source_uri == "file:///tmp/report.pdf"
+                result: Ok(uri),
+            }] if display_name == "report.pdf" && uri == "file:///tmp/report.pdf"
         ));
     }
 
@@ -1344,19 +1345,36 @@ mod tests {
     }
 
     #[test]
+    fn attachment_resolution_uses_one_final_uri_or_reports_unavailable() {
+        assert_eq!(
+            resolve_attachment_uri(
+                Some("file:///cache/prepared.pdf".into()),
+                "pigeon-eds-attachment:part-1".into(),
+            ),
+            Ok("file:///cache/prepared.pdf".into())
+        );
+        assert_eq!(
+            resolve_attachment_uri(None, "file:///external/report.pdf".into()),
+            Ok("file:///external/report.pdf".into())
+        );
+        assert_eq!(
+            resolve_attachment_uri(None, "pigeon-eds-attachment:part-1".into()),
+            Err("Attachment unavailable.".into())
+        );
+    }
+
+    #[test]
     fn multiple_attachment_results_keep_their_own_user_intent() {
         let manager = CacheManager::new();
         manager.publish(CacheEvent::attachment_prepared(
             AttachmentDisposition::Open,
             "first.pdf".into(),
-            "file:///tmp/first.pdf".into(),
-            Ok(Some("file:///cache/first.pdf".into())),
+            Ok("file:///cache/first.pdf".into()),
         ));
         manager.publish(CacheEvent::attachment_prepared(
             AttachmentDisposition::SaveAs,
             "second.png".into(),
-            "file:///tmp/second.png".into(),
-            Ok(Some("file:///cache/second.png".into())),
+            Ok("file:///cache/second.png".into()),
         ));
 
         let events = manager.drain();
@@ -1366,14 +1384,12 @@ mod tests {
                 CacheEvent::AttachmentPrepared {
                     disposition: AttachmentDisposition::Open,
                     display_name: first_name,
-                    result: Ok(Some(first_uri)),
-                    ..
+                    result: Ok(first_uri),
                 },
                 CacheEvent::AttachmentPrepared {
                     disposition: AttachmentDisposition::SaveAs,
                     display_name: second_name,
-                    result: Ok(Some(second_uri)),
-                    ..
+                    result: Ok(second_uri),
                 },
             ] if first_name == "first.pdf"
                 && first_uri == "file:///cache/first.pdf"

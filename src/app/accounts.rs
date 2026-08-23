@@ -29,6 +29,19 @@ impl AccountRuntime {
         self.mailbox_for_settings(settings)
     }
 
+    pub(crate) fn unavailable_mailbox() -> MailboxViewModel {
+        MailboxViewModel::from_snapshot(
+            vec![stub_account()],
+            AppSettings::default(),
+            stub_backend(),
+            crate::model::event::AccountMailboxSnapshot {
+                mode: crate::model::mail::MailboxMode::StubUnavailable,
+                folders: Vec::new(),
+                conversations: Vec::new(),
+            },
+        )
+    }
+
     pub(crate) fn mailbox_for_settings(&self, settings: AppSettings) -> MailboxViewModel {
         let (accounts, bindings, discovery_failed) =
             match crate::integration::backend::discover_accounts() {
@@ -41,7 +54,7 @@ impl AccountRuntime {
                     (Vec::<MailAccount>::new(), Vec::new(), true)
                 }
             };
-        self.mailbox_from_accounts(settings, accounts, bindings, discovery_failed, None)
+        self.mailbox_from_accounts(settings, accounts, bindings, discovery_failed, None, &[])
     }
 
     pub(crate) fn rediscover_mailbox(
@@ -51,12 +64,14 @@ impl AccountRuntime {
         changed_accounts: &[crate::model::account::MailAccountId],
     ) -> anyhow::Result<MailboxViewModel> {
         let (accounts, bindings) = crate::integration::backend::discover_accounts()?.into_parts();
-        if let Some(backend) = backend.as_ref() {
-            for account_id in changed_accounts {
-                backend.invalidate_account(account_id);
-            }
-        }
-        Ok(self.mailbox_from_accounts(settings, accounts, bindings, false, backend))
+        Ok(self.mailbox_from_accounts(
+            settings,
+            accounts,
+            bindings,
+            false,
+            backend,
+            changed_accounts,
+        ))
     }
 
     fn mailbox_from_accounts(
@@ -66,17 +81,26 @@ impl AccountRuntime {
         bindings: Vec<crate::integration::backend::EdsAccountBinding>,
         discovery_failed: bool,
         existing_backend: Option<SharedMailBackend>,
+        invalidated_accounts: &[crate::model::account::MailAccountId],
     ) -> MailboxViewModel {
         let settings = normalize_settings_for_accounts(settings, &accounts);
-        let selected_account = settings
+        let accounts = apply_account_profiles(accounts, &settings);
+        let selected_account_id = settings
             .selected_account_id
             .as_deref()
             .and_then(|selected| accounts.iter().find(|account| account.id.0 == selected))
-            .or_else(|| accounts.first());
-        let (backend, mailbox_mode) = if let Some(account) = selected_account {
-            let backend = existing_backend.unwrap_or_else(lazy_mail_backend);
-            backend.replace_available_bindings(&bindings);
-            let mode = futures::executor::block_on(backend.activate_account(account))
+            .or_else(|| accounts.first())
+            .map(|account| account.id.clone());
+        if let Some(backend) = existing_backend.as_ref() {
+            backend.update_binding_catalog(&bindings, invalidated_accounts);
+        }
+        let (backend, mailbox_mode) = if let Some(account_id) = selected_account_id.as_ref() {
+            let backend = existing_backend.unwrap_or_else(|| {
+                let backend = lazy_mail_backend();
+                backend.update_binding_catalog(&bindings, invalidated_accounts);
+                backend
+            });
+            let mode = futures::executor::block_on(backend.activate_account(account_id))
                 .unwrap_or_else(|error| {
                     crate::logging::report_failure("mail-account-activation", &error);
                     crate::model::mail::MailboxMode::StubUnavailable
@@ -92,15 +116,14 @@ impl AccountRuntime {
                 },
             )
         };
-        let accounts =
-            apply_account_profiles(apply_eds_identity_profiles(accounts, &bindings), &settings);
         let accounts = if accounts.is_empty() {
             vec![stub_account()]
         } else {
             accounts
         };
+        let initial_account_id = selected_account_id.unwrap_or_else(|| accounts[0].id.clone());
         let (snapshot, cache_failed) =
-            load_initial_cached_mail(&accounts, &settings, &backend, mailbox_mode);
+            load_initial_cached_mail(&initial_account_id, &backend, mailbox_mode);
         let mut mailbox = MailboxViewModel::from_snapshot(accounts, settings, backend, snapshot);
         if cache_failed && let Some(account_id) = mailbox.current_account_id() {
             mailbox
@@ -121,7 +144,7 @@ impl AccountRuntime {
             return;
         }
         if let Some(account) = mailbox.current_account()
-            && let Some(binding) = mailbox.eds_binding_for_account(mailbox.selected_account)
+            && let Some(binding) = mailbox.eds_binding(&account.id)
             && let Err(error) = sync_account_identity_to_eds(&binding, account)
         {
             crate::logging::report_deferred("eds-identity-writeback", &error);
@@ -130,33 +153,17 @@ impl AccountRuntime {
 }
 
 fn load_initial_cached_mail(
-    accounts: &[MailAccount],
-    settings: &AppSettings,
+    account_id: &crate::model::account::MailAccountId,
     backend: &SharedMailBackend,
     mode: crate::model::mail::MailboxMode,
 ) -> (crate::model::event::AccountMailboxSnapshot, bool) {
-    let selected_account = settings
-        .selected_account_id
-        .as_deref()
-        .and_then(|selected| accounts.iter().find(|account| account.id.0 == selected))
-        .or_else(|| accounts.first());
-    let Some(account) = selected_account else {
-        return (
-            crate::model::event::AccountMailboxSnapshot {
-                mode,
-                folders: Vec::new(),
-                conversations: Vec::new(),
-            },
-            false,
-        );
-    };
     let mail_service = crate::core::mail::MailService::new(backend.clone());
     match futures::executor::block_on(async {
-        let folders = mail_service.list_folders(&account.id).await?;
+        let folders = mail_service.list_folders(account_id).await?;
         let conversations = if let Some(folder) = folders.first() {
             mail_service
                 .list_conversations(
-                    &account.id,
+                    account_id,
                     &folder.id,
                     0,
                     crate::model::mail::CONVERSATION_PAGE_SIZE,
@@ -191,26 +198,9 @@ fn settings_for_mailbox(mailbox: &MailboxViewModel) -> AppSettings {
         selected_account_id: mailbox
             .current_account()
             .map(|account| account.id.0.clone()),
-        prefer_html_view: mailbox.prefer_html_view,
+        prefer_html_view: mailbox.prefer_html_view(),
         account_profiles: collect_account_profiles(mailbox),
     }
-}
-
-fn apply_eds_identity_profiles(
-    mut accounts: Vec<MailAccount>,
-    bindings: &[crate::integration::backend::EdsAccountBinding],
-) -> Vec<MailAccount> {
-    for account in &mut accounts {
-        let Some(binding) = bindings
-            .iter()
-            .find(|binding| binding.account_id == account.id.0)
-        else {
-            continue;
-        };
-        crate::core::identity::merge_eds_profile(account, binding);
-    }
-
-    accounts
 }
 
 fn apply_account_profiles(
@@ -296,6 +286,7 @@ fn apply_account_profiles(
                 String::new(),
                 String::new(),
                 alias.is_default,
+                alias.alias_id == primary.alias_id.0,
             );
             apply_profile_to_identity(&mut identity, alias, &primary);
             merged_aliases.push(identity);
@@ -426,19 +417,15 @@ struct PrimaryIdentityContext {
 
 impl PrimaryIdentityContext {
     fn from_account(account: &MailAccount) -> Self {
-        let primary = account.primary_or_first_identity().cloned();
+        let primary = account
+            .primary_or_first_identity()
+            .expect("a discovered mail account must have a sending identity");
 
         Self {
-            alias_id: primary
-                .as_ref()
-                .map(|identity| identity.id.clone())
-                .unwrap_or_else(|| AliasId(format!("{}:primary", account.id.0))),
-            address: account.primary_address.clone(),
-            display_name: primary
-                .as_ref()
-                .map(|identity| identity.display_name.clone())
-                .unwrap_or_default(),
-            reply_to: primary.and_then(|identity| identity.reply_to.clone()),
+            alias_id: primary.id.clone(),
+            address: primary.address.clone(),
+            display_name: primary.display_name.clone(),
+            reply_to: primary.reply_to.clone(),
         }
     }
 
@@ -451,6 +438,7 @@ impl PrimaryIdentityContext {
             format!("<p>{}</p>", signature_name),
             signature_name,
             is_default,
+            true,
         )
     }
 }
@@ -458,10 +446,15 @@ impl PrimaryIdentityContext {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::integration::backend::EdsAccountBinding;
     use crate::model::account::MailAccountId;
 
-    fn identity(id: &str, address: &str, username: &str, is_default: bool) -> SendingIdentity {
+    fn identity(
+        id: &str,
+        address: &str,
+        username: &str,
+        is_default: bool,
+        is_primary: bool,
+    ) -> SendingIdentity {
         SendingIdentity::with_id(
             AliasId(id.to_string()),
             address.to_string(),
@@ -470,6 +463,7 @@ mod tests {
             String::new(),
             String::new(),
             is_default,
+            is_primary,
         )
     }
 
@@ -491,12 +485,17 @@ mod tests {
         let account_id = "account-1";
         aliases.insert(
             0,
-            identity("account-1:primary", "primary@example.com", "Primary", true),
+            identity(
+                "account-1:primary",
+                "primary@example.com",
+                "Primary",
+                true,
+                true,
+            ),
         );
         let accounts = vec![MailAccount {
             id: MailAccountId(account_id.to_string()),
             display_name: "Account".to_string(),
-            primary_address: "primary@example.com".to_string(),
             aliases,
         }];
         let mut local_profiles = vec![profile(
@@ -529,11 +528,11 @@ mod tests {
             let account = MailAccount {
                 id: MailAccountId("account-fixture-1".into()),
                 display_name: "Example Account".into(),
-                primary_address: "owner@example.com".into(),
                 aliases: vec![identity(
                     "account-fixture-1:primary",
                     "owner@example.com",
                     "Example Owner",
+                    true,
                     true,
                 )],
             };
@@ -547,7 +546,7 @@ mod tests {
                     conversations: Vec::new(),
                 },
             );
-            mailbox.prefer_html_view = prefer_html_view;
+            mailbox.set_prefer_html_view(prefer_html_view);
             let persisted = settings_for_mailbox(&mailbox);
 
             assert_eq!(
@@ -568,44 +567,32 @@ mod tests {
         let untouched = MailAccount {
             id: MailAccountId("account-fixture-1".into()),
             display_name: "First Account".into(),
-            primary_address: "first@example.com".into(),
             aliases: vec![identity(
                 "account-fixture-1:primary",
                 "first@example.com",
                 "First User",
+                true,
                 true,
             )],
         };
         let hydrated = MailAccount {
             id: MailAccountId("account-fixture-2".into()),
             display_name: "Second Account".into(),
-            primary_address: "second@example.com".into(),
             aliases: vec![identity(
                 "account-fixture-2:primary",
                 "second@example.com",
                 "Second User",
                 true,
+                true,
             )],
         };
-        let binding = EdsAccountBinding {
-            account_id: hydrated.id.0.clone(),
-            account_label: "Second Account".into(),
-            account_uid: None,
-            account_parent_uid: None,
-            account_backend_name: None,
-            account_auth_method: None,
-            identity_uid: None,
-            identity_name: Some("Provider User".into()),
-            identity_reply_to: Some("provider-reply@example.net".into()),
-            identity_aliases: Some("Provider Alias <alias@example.net>".into()),
-            transport_uid: None,
-            transport_backend_name: None,
-            transport_auth_method: None,
-            drafts_folder: None,
-            sent_folder: None,
-        };
-
-        let accounts = apply_eds_identity_profiles(vec![untouched, hydrated], &[binding]);
+        let mut accounts = vec![untouched, hydrated];
+        crate::core::identity::merge_eds_profile(
+            &mut accounts[1],
+            Some("Provider User"),
+            Some("provider-reply@example.net"),
+            Some("Provider Alias <alias@example.net>"),
+        );
 
         assert_eq!(accounts[0].aliases.len(), 1);
         let primary = accounts[1].primary_identity().unwrap();
@@ -635,32 +622,19 @@ mod tests {
             String::new(),
             String::new(),
             true,
+            true,
         );
-        let accounts = vec![MailAccount {
+        let mut accounts = vec![MailAccount {
             id: MailAccountId(account_id.to_string()),
             display_name: "Example Account".to_string(),
-            primary_address: "owner@example.com".to_string(),
             aliases: vec![primary],
         }];
-        let binding = EdsAccountBinding {
-            account_id: account_id.to_string(),
-            account_label: "Example Account".to_string(),
-            account_uid: None,
-            account_parent_uid: None,
-            account_backend_name: None,
-            account_auth_method: None,
-            identity_uid: None,
-            identity_name: Some("Example Owner".to_string()),
-            identity_reply_to: None,
-            identity_aliases: Some(
-                "Example Owner <owner@example.com>, Project Alias <alias@example.net>".to_string(),
-            ),
-            transport_uid: None,
-            transport_backend_name: None,
-            transport_auth_method: None,
-            drafts_folder: None,
-            sent_folder: None,
-        };
+        crate::core::identity::merge_eds_profile(
+            &mut accounts[0],
+            Some("Example Owner"),
+            None,
+            Some("Example Owner <owner@example.com>, Project Alias <alias@example.net>"),
+        );
         let settings: AppSettings = serde_json::from_str(
             r#"{
                 "selected_account_id": "account-fixture-1",
@@ -699,8 +673,7 @@ mod tests {
         )
         .expect("test settings JSON should deserialize");
 
-        let accounts =
-            apply_account_profiles(apply_eds_identity_profiles(accounts, &[binding]), &settings);
+        let accounts = apply_account_profiles(accounts, &settings);
         let aliases = &accounts[0].aliases;
 
         assert_eq!(aliases.len(), 3);
@@ -739,6 +712,7 @@ mod tests {
                 "  ALIAS@Example.COM ",
                 " Alias User ",
                 false,
+                false,
             )],
             vec![profile(
                 "account-1:local-alias",
@@ -757,8 +731,20 @@ mod tests {
     fn same_address_with_different_usernames_remains_distinct() {
         let aliases = merge_profiles(
             vec![
-                identity("account-1:eds:second", "same@example.com", "Second", false),
-                identity("account-1:eds:first", "same@example.com", "First", false),
+                identity(
+                    "account-1:eds:second",
+                    "same@example.com",
+                    "Second",
+                    false,
+                    false,
+                ),
+                identity(
+                    "account-1:eds:first",
+                    "same@example.com",
+                    "First",
+                    false,
+                    false,
+                ),
             ],
             vec![
                 profile("account-1:first", "same@example.com", "First"),
@@ -779,6 +765,7 @@ mod tests {
                 "shared@example.com",
                 "Shared",
                 false,
+                false,
             )],
             vec![
                 profile("account-1:first", "shared@example.com", "Shared"),
@@ -798,6 +785,7 @@ mod tests {
                 "account-1:eds:only",
                 "eds@example.com",
                 "EDS Only",
+                false,
                 false,
             )],
             vec![profile(
@@ -821,11 +809,13 @@ mod tests {
                     "duplicate@example.com",
                     "Duplicate",
                     false,
+                    false,
                 ),
                 identity(
                     "account-1:eds:duplicate",
                     "duplicate@example.com",
                     "Duplicate",
+                    false,
                     false,
                 ),
             ],

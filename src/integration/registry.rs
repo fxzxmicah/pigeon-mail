@@ -12,13 +12,8 @@ use anyhow::{Result, anyhow};
 
 #[derive(Debug, Clone, Default)]
 pub struct Source {
-    pub object_path: String,
-    pub uid: Option<String>,
+    pub uid: String,
     pub parent: Option<String>,
-    pub goa_account_id: Option<String>,
-    pub goa_name: Option<String>,
-    pub goa_address: Option<String>,
-    pub mail_enabled: Option<bool>,
     pub identity_name: Option<String>,
     pub identity_address: Option<String>,
     pub identity_reply_to: Option<String>,
@@ -31,25 +26,18 @@ pub struct Source {
 
 #[derive(Debug, Clone)]
 pub struct MailTriplet {
-    pub account: Option<Source>,
+    pub account: Source,
     pub identity: Option<Source>,
     pub transport: Option<Source>,
-}
-
-#[derive(Debug, Clone)]
-pub struct Relationship {
-    pub account_uid: Option<String>,
-    pub identity_uid: Option<String>,
-    pub transport_uid: Option<String>,
+    pub goa_account_id: Option<String>,
+    pub goa_name: Option<String>,
+    pub goa_address: Option<String>,
+    pub mail_enabled: Option<bool>,
 }
 
 #[derive(Debug, Clone, Default)]
 pub struct Snapshot {
-    pub accounts: Vec<Source>,
-    pub identities: Vec<Source>,
-    pub transports: Vec<Source>,
     pub triplets: Vec<MailTriplet>,
-    pub relationships: Vec<Relationship>,
 }
 
 const EXTENSION_GOA: &[&str] = &["GNOME Online Accounts", "goa"];
@@ -589,18 +577,6 @@ fn build_snapshot(infos: &[SourceInfo]) -> Result<Snapshot> {
     let mut transports = Vec::new();
 
     for info in infos {
-        let inherited_goa_account_id = inherited_source_value(info, &info_by_uid, |source| {
-            source.direct_goa_account_id.as_ref()
-        });
-        let inherited_goa_name =
-            inherited_source_value(info, &info_by_uid, |source| source.direct_goa_name.as_ref());
-        let inherited_goa_address = inherited_source_value(info, &info_by_uid, |source| {
-            source.direct_goa_address.as_ref()
-        });
-        let inherited_collection_mail_enabled =
-            inherited_source_value(info, &info_by_uid, |source| {
-                source.direct_collection_mail_enabled.as_ref()
-            });
         let resolved_backend_name = if info.is_account {
             info.direct_mail_account_backend_name.clone()
         } else if info.is_transport {
@@ -610,13 +586,8 @@ fn build_snapshot(infos: &[SourceInfo]) -> Result<Snapshot> {
         };
 
         let entry = Source {
-            object_path: format!("esource:{}", info.uid),
-            uid: Some(info.uid.clone()),
+            uid: info.uid.clone(),
             parent: info.parent.clone(),
-            goa_account_id: inherited_goa_account_id,
-            goa_name: inherited_goa_name,
-            goa_address: inherited_goa_address,
-            mail_enabled: inherited_collection_mail_enabled,
             identity_name: info.direct_name.clone(),
             identity_address: info.direct_address.clone(),
             identity_reply_to: info.direct_reply_to.clone(),
@@ -636,110 +607,92 @@ fn build_snapshot(infos: &[SourceInfo]) -> Result<Snapshot> {
         }
     }
 
-    accounts.sort_by(|left, right| left.object_path.cmp(&right.object_path));
-    identities.sort_by(|left, right| left.object_path.cmp(&right.object_path));
-    transports.sort_by(|left, right| left.object_path.cmp(&right.object_path));
-
     let entries_by_uid = accounts
         .iter()
         .chain(identities.iter())
         .chain(transports.iter())
-        .filter_map(|entry| entry.uid.as_ref().map(|uid| (uid.clone(), entry.clone())))
+        .map(|entry| (entry.uid.clone(), entry.clone()))
         .collect::<BTreeMap<_, _>>();
 
-    let mut relationships = Vec::new();
-    let mut referenced_identity_uids = BTreeSet::new();
-    let mut referenced_transport_uids = BTreeSet::new();
-
+    let mut triplets = Vec::new();
     for info in infos.iter().filter(|info| info.is_account) {
-        let account_entry = match entries_by_uid.get(&info.uid) {
-            Some(entry) => entry,
-            None => continue,
+        let identity_uid = info.direct_identity_uid.as_ref();
+        let identity_info = identity_uid.and_then(|uid| info_by_uid.get(uid));
+        let transport_uid = identity_info.and_then(|info| info.direct_transport_uid.as_ref());
+        let transport_info = transport_uid.and_then(|uid| info_by_uid.get(uid));
+        let source_goa_id = |source: &SourceInfo| {
+            inherited_source_value(source, &info_by_uid, |entry| {
+                entry.direct_goa_account_id.as_ref()
+            })
         };
-
-        let identity_uid = info.direct_identity_uid.clone();
-        let transport_uid = identity_uid
-            .as_ref()
-            .and_then(|uid| info_by_uid.get(uid))
-            .and_then(|identity_info| identity_info.direct_transport_uid.clone());
-        if let Some(uid) = identity_uid.clone() {
-            referenced_identity_uids.insert(uid);
-        }
-        if let Some(uid) = transport_uid.clone() {
-            referenced_transport_uids.insert(uid);
-        }
-
-        relationships.push(Relationship {
-            account_uid: account_entry.uid.clone(),
-            identity_uid: identity_uid.clone(),
-            transport_uid: transport_uid.clone(),
+        let account_goa_id = source_goa_id(info);
+        let identity_goa_id = identity_info.and_then(|source| source_goa_id(source));
+        let transport_goa_id = transport_info.and_then(|source| source_goa_id(source));
+        let goa_account_id = match (
+            account_goa_id.as_deref(),
+            identity_goa_id.as_deref(),
+            transport_goa_id.as_deref(),
+        ) {
+            (Some(account), Some(identity), Some(transport))
+                if account == identity && account == transport =>
+            {
+                Some(account.to_string())
+            }
+            _ => None,
+        };
+        let goa_name = identity_info
+            .and_then(|source| {
+                inherited_source_value(source, &info_by_uid, |entry| entry.direct_goa_name.as_ref())
+            })
+            .or_else(|| {
+                inherited_source_value(info, &info_by_uid, |entry| entry.direct_goa_name.as_ref())
+            })
+            .or_else(|| {
+                transport_info.and_then(|source| {
+                    inherited_source_value(source, &info_by_uid, |entry| {
+                        entry.direct_goa_name.as_ref()
+                    })
+                })
+            });
+        let goa_address = identity_info
+            .and_then(|source| {
+                inherited_source_value(source, &info_by_uid, |entry| {
+                    entry.direct_goa_address.as_ref()
+                })
+            })
+            .or_else(|| {
+                inherited_source_value(info, &info_by_uid, |entry| {
+                    entry.direct_goa_address.as_ref()
+                })
+            })
+            .or_else(|| {
+                transport_info.and_then(|source| {
+                    inherited_source_value(source, &info_by_uid, |entry| {
+                        entry.direct_goa_address.as_ref()
+                    })
+                })
+            });
+        triplets.push(MailTriplet {
+            account: entries_by_uid
+                .get(&info.uid)
+                .expect("account source must exist in its own registry snapshot")
+                .clone(),
+            identity: identity_uid
+                .and_then(|uid| entries_by_uid.get(uid))
+                .cloned(),
+            transport: transport_uid
+                .and_then(|uid| entries_by_uid.get(uid))
+                .cloned(),
+            goa_account_id,
+            goa_name,
+            goa_address,
+            mail_enabled: inherited_source_value(info, &info_by_uid, |entry| {
+                entry.direct_collection_mail_enabled.as_ref()
+            }),
         });
     }
 
-    let mut triplets = relationships
-        .iter()
-        .map(|relationship| MailTriplet {
-            account: relationship
-                .account_uid
-                .as_ref()
-                .and_then(|uid| entries_by_uid.get(uid))
-                .cloned(),
-            identity: relationship
-                .identity_uid
-                .as_ref()
-                .and_then(|uid| entries_by_uid.get(uid))
-                .cloned(),
-            transport: relationship
-                .transport_uid
-                .as_ref()
-                .and_then(|uid| entries_by_uid.get(uid))
-                .cloned(),
-        })
-        .collect::<Vec<_>>();
-
-    triplets.extend(
-        transports
-            .iter()
-            .filter(|entry| {
-                entry
-                    .uid
-                    .as_ref()
-                    .map(|uid| !referenced_transport_uids.contains(uid))
-                    .unwrap_or(true)
-            })
-            .cloned()
-            .map(|transport| MailTriplet {
-                account: None,
-                identity: None,
-                transport: Some(transport),
-            }),
-    );
-
-    triplets.extend(
-        identities
-            .iter()
-            .filter(|entry| {
-                entry
-                    .uid
-                    .as_ref()
-                    .map(|uid| !referenced_identity_uids.contains(uid))
-                    .unwrap_or(true)
-            })
-            .cloned()
-            .map(|identity| MailTriplet {
-                account: None,
-                identity: Some(identity),
-                transport: None,
-            }),
-    );
-
-    Ok(Snapshot {
-        accounts,
-        identities,
-        transports,
-        triplets,
-        relationships,
-    })
+    Ok(Snapshot { triplets })
 }
 
 fn inherited_source_value<T: Clone>(
@@ -1011,16 +964,13 @@ mod tests {
 
         assert_eq!(snapshot.triplets.len(), 1);
         let triplet = &snapshot.triplets[0];
-        for entry in [
-            triplet.account.as_ref().unwrap(),
-            triplet.identity.as_ref().unwrap(),
-            triplet.transport.as_ref().unwrap(),
-        ] {
-            assert_eq!(entry.goa_account_id.as_deref(), Some("account-example"));
-            assert_eq!(entry.goa_name.as_deref(), Some("Example Account"));
-            assert_eq!(entry.goa_address.as_deref(), Some("owner@example.invalid"));
-            assert_eq!(entry.mail_enabled, Some(true));
-        }
+        assert_eq!(triplet.goa_account_id.as_deref(), Some("account-example"));
+        assert_eq!(triplet.goa_name.as_deref(), Some("Example Account"));
+        assert_eq!(
+            triplet.goa_address.as_deref(),
+            Some("owner@example.invalid")
+        );
+        assert_eq!(triplet.mail_enabled, Some(true));
         assert_eq!(
             triplet
                 .identity
@@ -1030,6 +980,27 @@ mod tests {
                 .as_deref(),
             Some("identity@example.invalid")
         );
+    }
+
+    #[test]
+    fn triplet_rejects_conflicting_inherited_goa_ownership() {
+        let mut collection = source("collection", None);
+        collection.direct_goa_account_id = Some("account-one".into());
+
+        let mut account = source("account", Some("collection"));
+        account.is_account = true;
+        account.direct_identity_uid = Some("identity".into());
+        let mut identity = source("identity", Some("collection"));
+        identity.is_identity = true;
+        identity.direct_goa_account_id = Some("account-two".into());
+        identity.direct_transport_uid = Some("transport".into());
+        let mut transport = source("transport", Some("collection"));
+        transport.is_transport = true;
+
+        let snapshot = build_snapshot(&[collection, account, identity, transport]).unwrap();
+
+        assert_eq!(snapshot.triplets.len(), 1);
+        assert_eq!(snapshot.triplets[0].goa_account_id, None);
     }
 
     #[test]

@@ -9,7 +9,7 @@ use anyhow::{Result, anyhow};
 use crate::integration::backend::EdsAccountBinding;
 use crate::model::mail::{
     AttachmentInfo, ConversationId, ConversationSummary, FolderId, FolderKind, MailFolder,
-    MessageBody, MessageDetail, MessageId,
+    MessageBody, MessageDetail, MessageId, StoredMessageRef,
 };
 
 #[cfg(debug_assertions)]
@@ -54,7 +54,6 @@ const CAMEL_RECIPIENT_TYPE_CC: &[u8] = b"Cc\0";
 const CAMEL_RECIPIENT_TYPE_BCC: &[u8] = b"Bcc\0";
 
 pub(crate) struct AppendMessageRequest<'a> {
-    pub source_uid: &'a str,
     pub message_id: Option<&'a str>,
     pub folder_id: &'a FolderId,
     pub from: &'a str,
@@ -110,7 +109,7 @@ pub(crate) struct TransportSession {
 }
 
 pub(crate) struct ChangeMonitor {
-    _session: AccountSession,
+    _session_guard: AccountSession,
     folders: Vec<WatchedFolder>,
 }
 
@@ -149,12 +148,13 @@ impl ChangeMonitor {
         for folder_info in session.list_folders()? {
             let folder = match unsafe { get_folder(session.store, &folder_info.id.0) } {
                 Ok(folder) => folder,
-                Err(_error) => {
+                Err(error) => {
                     development_probe_log!(
                         "change monitor skipped folder {}: {}",
                         folder_info.id.0,
-                        _error
+                        error
                     );
+                    drop(error);
                     continue;
                 }
             };
@@ -189,7 +189,7 @@ impl ChangeMonitor {
             "active account change monitor connected"
         );
         Ok(Self {
-            _session: session,
+            _session_guard: session,
             folders,
         })
     }
@@ -488,23 +488,14 @@ impl AccountSession {
     }
 
     fn open_with_mode(binding: &EdsAccountBinding, mode: CamelAccessMode) -> Result<Self> {
-        let source_uid = binding
-            .account_uid
-            .as_deref()
-            .ok_or_else(|| anyhow!("EDS binding is missing account_uid"))?
-            .to_string();
-        let backend_name = binding
-            .account_backend_name
-            .as_deref()
-            .ok_or_else(|| anyhow!("EDS binding is missing account backend_name"))?
-            .to_string();
-        let auth_method = binding
-            .account_auth_method
-            .as_deref()
-            .unwrap_or("unknown")
-            .to_string();
+        let auth_method = binding.account_auth_method.as_deref().unwrap_or("unknown");
 
-        Self::open_source_with_mode(&source_uid, &backend_name, &auth_method, mode)
+        Self::open_source_with_mode(
+            &binding.account_uid,
+            &binding.account_backend_name,
+            auth_method,
+            mode,
+        )
     }
 
     fn open_source_with_mode(
@@ -851,11 +842,11 @@ impl AccountSession {
     pub(crate) fn append_message(
         &mut self,
         request: &AppendMessageRequest<'_>,
-    ) -> Result<Option<MessageDetail>> {
+    ) -> Result<Option<StoredMessageRef>> {
         unsafe {
             append_message_to_folder(
                 self.store,
-                request.folder_id,
+                &self.account_uid,
                 request,
                 matches!(self.access_mode, CamelAccessMode::Online),
             )
@@ -936,31 +927,22 @@ impl AccountSession {
 
 impl TransportSession {
     pub(crate) fn open_online(binding: &EdsAccountBinding) -> Result<Self> {
-        let account_uid = binding
-            .transport_uid
-            .as_deref()
-            .ok_or_else(|| anyhow!("EDS binding is missing transport_uid"))?
-            .to_string();
-        let backend_name = binding
-            .transport_backend_name
-            .as_deref()
-            .ok_or_else(|| anyhow!("EDS binding is missing transport backend_name"))?
-            .to_string();
+        let account_uid = binding.transport_uid.as_str();
+        let backend_name = binding.transport_backend_name.as_str();
         let auth_method = binding
             .transport_auth_method
             .as_deref()
-            .unwrap_or("unknown")
-            .to_string();
+            .unwrap_or("unknown");
 
         unsafe {
             let registry = new_registry()?;
-            let account_source = ref_source(registry, &account_uid).ok_or_else(|| {
+            let account_source = ref_source(registry, account_uid).ok_or_else(|| {
                 anyhow!(
                     "EDS registry could not resolve transport source {}",
-                    account_uid
+                    binding.transport_uid
                 )
             })?;
-            let config_source = find_service_config_source(registry, account_source, &backend_name)
+            let config_source = find_service_config_source(registry, account_source, backend_name)
                 .ok_or_else(|| {
                     anyhow!(
                         "could not find an EDS source with Camel backend extension for transport '{}' and backend '{}'",
@@ -985,7 +967,7 @@ impl TransportSession {
             let service = add_service(
                 session,
                 &service_uid,
-                &backend_name,
+                backend_name,
                 CAMEL_PROVIDER_TRANSPORT,
             )?;
             e_source_camel_configure_service(config_source, service);
@@ -1148,30 +1130,49 @@ pub(crate) fn account_cache_root_for_binding(binding: &EdsAccountBinding) -> Res
         .ok_or_else(|| anyhow!("camel_service_get_user_cache_dir returned NULL"))
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct FolderUri<'a> {
+    source_uid: &'a str,
+    folder_path: &'a str,
+}
+
+impl<'a> FolderUri<'a> {
+    pub(crate) fn parse(uri: &'a str) -> Option<Self> {
+        let (source_uid, folder_path) = uri.strip_prefix("folder://")?.split_once('/')?;
+        (!source_uid.is_empty() && !folder_path.is_empty()).then_some(Self {
+            source_uid,
+            folder_path,
+        })
+    }
+
+    pub(crate) fn parse_local(uri: &'a str) -> Option<Self> {
+        Self::parse(uri).filter(|uri| uri.is_local())
+    }
+
+    pub(crate) fn source_uid(self) -> &'a str {
+        self.source_uid
+    }
+
+    pub(crate) fn folder_path(self) -> &'a str {
+        self.folder_path
+    }
+
+    pub(crate) fn is_local(self) -> bool {
+        self.source_uid == "local"
+    }
+}
+
 pub(crate) fn ensure_local_maildir_folders(folder_uris: &[&str]) -> Result<()> {
     if folder_uris.is_empty() {
         return Ok(());
     }
 
-    let (source_uid, _) = folder_uris[0]
-        .strip_prefix("folder://")
-        .and_then(|folder_target| folder_target.split_once('/'))
-        .ok_or_else(|| anyhow!("invalid local folder uri: {}", folder_uris[0]))?;
-    let mut session = AccountSession::open_cached_source(source_uid, "maildir")?;
+    let mut session = AccountSession::open_cached_source("local", "maildir")?;
 
     for folder_uri in folder_uris {
-        let (folder_source_uid, folder_path) = folder_uri
-            .strip_prefix("folder://")
-            .and_then(|folder_target| folder_target.split_once('/'))
+        let folder = FolderUri::parse_local(folder_uri)
             .ok_or_else(|| anyhow!("invalid local folder uri: {folder_uri}"))?;
-        if folder_source_uid != source_uid {
-            return Err(anyhow!(
-                "local folder URIs reference different sources: '{}' vs '{}'",
-                source_uid,
-                folder_source_uid
-            ));
-        }
-        session.ensure_folder_path(&FolderId(folder_path.to_string()))?;
+        session.ensure_folder_path(&FolderId(folder.folder_path().to_string()))?;
     }
     Ok(())
 }
@@ -1907,16 +1908,21 @@ unsafe fn export_attachment(
 
 unsafe fn append_message_to_folder(
     store: *mut CamelStore,
-    folder_id: &FolderId,
+    source_uid: &str,
     request: &AppendMessageRequest<'_>,
     allow_network_fetch: bool,
-) -> Result<Option<MessageDetail>> {
-    let folder = unsafe { get_folder(store, &folder_id.0) }
-        .map_err(|error| anyhow!("failed to open Camel folder '{}': {}", folder_id.0, error))?;
+) -> Result<Option<StoredMessageRef>> {
+    let folder = unsafe { get_folder(store, &request.folder_id.0) }.map_err(|error| {
+        anyhow!(
+            "failed to open Camel folder '{}': {}",
+            request.folder_id.0,
+            error
+        )
+    })?;
 
     let result = (|| unsafe {
-        let source_uid = CString::new(request.source_uid)
-            .map_err(|_| anyhow!("source uid contains interior NUL"))?;
+        let source_uid_c =
+            CString::new(source_uid).map_err(|_| anyhow!("source uid contains interior NUL"))?;
         let message_id = request
             .message_id
             .map(CString::new)
@@ -1943,7 +1949,7 @@ unsafe fn append_message_to_folder(
 
         let ok = mail_bridge_eds_append_text_message(
             folder,
-            source_uid.as_ptr(),
+            source_uid_c.as_ptr(),
             message_id
                 .as_ref()
                 .map_or(ptr::null(), |value| value.as_ptr()),
@@ -1979,18 +1985,19 @@ unsafe fn append_message_to_folder(
 
         let conversation_id = ConversationId(format!(
             "{}{}{}",
-            folder_id.0, CONVERSATION_ID_SEPARATOR, appended_uid
+            request.folder_id.0, CONVERSATION_ID_SEPARATOR, appended_uid
         ));
         // Appends currently target the built-in local Maildir. Its provider does not implement
         // get_message_cached(), but get_message_sync() reads the just-written local MIME without
         // performing network I/O.
         load_message_detail(
             store,
-            &folder_id.0,
+            &request.folder_id.0,
             &appended_uid,
             &conversation_id,
-            allow_network_fetch || request.source_uid == "local",
+            allow_network_fetch || source_uid_c.to_bytes() == b"local",
         )
+        .map(|detail| detail.as_ref().map(StoredMessageRef::from))
     })();
 
     unsafe { glib::gobject_ffi::g_object_unref(folder as *mut _) };
@@ -2388,11 +2395,7 @@ fn collect_folder_info(info: *mut CamelFolderInfo, folders: &mut Vec<MailFolder>
             id: FolderId(folder_id.clone()),
             name: folder_name,
             unread_count: unsafe { (*cursor).unread.max(0) as u32 },
-            kind: classify_folder_kind(
-                unsafe { (*cursor).flags },
-                &folder_id,
-                display_name.as_deref(),
-            ),
+            kind: classify_folder_kind(unsafe { (*cursor).flags }),
         });
 
         let child = unsafe { (*cursor).child };
@@ -2403,11 +2406,7 @@ fn collect_folder_info(info: *mut CamelFolderInfo, folders: &mut Vec<MailFolder>
     }
 }
 
-fn classify_folder_kind(
-    flags: c_uint,
-    _full_name: &str,
-    _display_name: Option<&str>,
-) -> FolderKind {
+fn classify_folder_kind(flags: c_uint) -> FolderKind {
     match flags & CAMEL_FOLDER_TYPE_MASK {
         CAMEL_FOLDER_TYPE_INBOX => FolderKind::Inbox,
         CAMEL_FOLDER_TYPE_OUTBOX => FolderKind::Outbox,
@@ -2639,7 +2638,31 @@ fn local_folder_path_prefixes(folder_path: &str) -> Result<Vec<&str>> {
 
 #[cfg(test)]
 mod tests {
-    use super::{local_folder_path_prefixes, search_expression, serialize_attachment_uris};
+    use super::{
+        FolderUri, local_folder_path_prefixes, search_expression, serialize_attachment_uris,
+    };
+
+    #[test]
+    fn folder_uri_parsing_owns_the_source_and_path_invariant() {
+        let uri = FolderUri::parse("folder://local/account-1/Drafts").unwrap();
+        assert!(uri.is_local());
+        assert_eq!(uri.source_uid(), "local");
+        assert_eq!(uri.folder_path(), "account-1/Drafts");
+        assert!(FolderUri::parse("folder://provider/Inbox").is_some());
+        assert!(FolderUri::parse_local("folder://provider/Inbox").is_none());
+
+        for malformed in [
+            "local/account-1/Drafts",
+            "folder:///account-1/Drafts",
+            "folder://local/",
+            "folder://local",
+        ] {
+            assert!(
+                FolderUri::parse(malformed).is_none(),
+                "accepted {malformed:?}"
+            );
+        }
+    }
 
     #[test]
     fn nested_local_folder_creation_includes_each_parent() {

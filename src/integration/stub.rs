@@ -5,11 +5,14 @@ use crate::model::mail::{
 
 const STUB_ACCOUNT_ID: &str = "local-stub";
 
+pub(crate) fn is_stub_account_id(account_id: &MailAccountId) -> bool {
+    account_id.0 == STUB_ACCOUNT_ID
+}
+
 pub(crate) fn stub_account() -> MailAccount {
     MailAccount {
         id: MailAccountId(STUB_ACCOUNT_ID.into()),
         display_name: "Pigeon Mail Stub".into(),
-        primary_address: "welcome@pigeon.invalid".into(),
         aliases: vec![SendingIdentity::with_id(
             AliasId("local-stub-primary".into()),
             "welcome@pigeon.invalid".into(),
@@ -17,6 +20,7 @@ pub(crate) fn stub_account() -> MailAccount {
             None,
             "<p>Pigeon Mail</p>".into(),
             "Pigeon Mail".into(),
+            true,
             true,
         )],
     }
