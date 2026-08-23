@@ -1,4 +1,5 @@
 use adw::prelude::*;
+use gtk::glib::variant::ToVariant;
 use gtk::{gio, glib, pango};
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -10,7 +11,7 @@ pub(crate) use state::*;
 use crate::core::cache::CacheManager;
 use crate::integration::webkit::{configure_mail_view, load_html_document, stop_html_loading};
 use crate::model::event::{AttachmentDisposition, CacheEvent};
-use crate::model::mail::MailtoRequest;
+use crate::model::mail::{FolderId, MailtoRequest};
 
 use super::compose::{ComposeKind, ComposePage, ComposeViewModel};
 use super::dialogs::{build_settings, present_about};
@@ -30,6 +31,7 @@ pub struct MainWindow {
     mailbox_controls: MailboxControls,
     toast_overlay: adw::ToastOverlay,
     pending_mailto: Rc<RefCell<Vec<MailtoRequest>>>,
+    pending_folder: Rc<RefCell<Option<(crate::model::account::MailAccountId, FolderId)>>>,
 }
 
 #[derive(Clone)]
@@ -60,6 +62,7 @@ impl MainWindow {
     pub fn new(app: &adw::Application, mailbox: MailboxViewModel) -> Self {
         let state = Rc::new(RefCell::new(mailbox));
         let pending_mailto = Rc::new(RefCell::new(Vec::new()));
+        let pending_folder = Rc::new(RefCell::new(None));
 
         let header = adw::HeaderBar::new();
         let backend_summary = state.borrow().backend_summary();
@@ -178,26 +181,6 @@ impl MainWindow {
             !state.is_loading() && state.current_account().is_some()
         };
         account_dropdown.set_sensitive(account_ready);
-        app.remove_action("show-account");
-        let show_account_action =
-            gio::SimpleAction::new("show-account", Some(glib::VariantTy::STRING));
-        let state_for_notification_action = Rc::clone(&state);
-        let dropdown_for_notification_action = account_dropdown.clone();
-        let window_for_notification_action = inner.clone();
-        show_account_action.connect_activate(move |_, parameter| {
-            let Some(account_id) = parameter.and_then(glib::Variant::str) else {
-                return;
-            };
-            if dropdown_for_notification_action.is_sensitive()
-                && let Some(index) = state_for_notification_action
-                    .borrow()
-                    .account_index(&crate::model::account::MailAccountId(account_id.into()))
-            {
-                dropdown_for_notification_action.set_selected(index as u32);
-            }
-            window_for_notification_action.present();
-        });
-        app.add_action(&show_account_action);
         header.pack_start(compose_page.back_button());
         header.pack_start(&account_dropdown);
         header.pack_start(&compose_button);
@@ -335,6 +318,7 @@ impl MainWindow {
         let mailbox_controls_for_events = mailbox_controls.clone();
         let compose_page_for_events = compose_page.clone();
         let pending_mailto_for_events = Rc::clone(&pending_mailto);
+        let pending_folder_for_events = Rc::clone(&pending_folder);
         glib::timeout_add_local(std::time::Duration::from_millis(50), move || {
             for event in cache_for_events.drain() {
                 match event {
@@ -356,6 +340,12 @@ impl MainWindow {
                             rebuild_thread_panel(
                                 &state_for_refresh_events,
                                 &thread_for_refresh_events,
+                            );
+                            apply_pending_folder(
+                                &pending_folder_for_events,
+                                &state_for_refresh_events,
+                                &account_dropdown_for_events,
+                                &sidebar_for_refresh_events,
                             );
                             queue_current_account_refresh(
                                 &state_for_refresh_events,
@@ -424,9 +414,20 @@ impl MainWindow {
                                 &state_for_refresh_events,
                                 &thread_for_refresh_events,
                             );
+                            apply_pending_folder(
+                                &pending_folder_for_events,
+                                &state_for_refresh_events,
+                                &account_dropdown_for_events,
+                                &sidebar_for_refresh_events,
+                            );
                         }
                     }
-                    CacheEvent::NewMailAvailable { account_id, count } => {
+                    CacheEvent::NewMailAvailable {
+                        account_id,
+                        folder_id,
+                        folder_name,
+                        count,
+                    } => {
                         if !notification_belongs_to_active_account(
                             state_for_refresh_events
                                 .borrow()
@@ -441,25 +442,21 @@ impl MainWindow {
                             .account_display_name(&account_id)
                             .unwrap_or("mail account")
                             .to_string();
-                        let notification = gio::Notification::new(if count == 1 {
-                            "New mail"
-                        } else {
-                            "New mail available"
-                        });
-                        notification.set_body(Some(&format!(
-                            "{} new conversation{} in {}",
+                        let notification = gio::Notification::new("New mail");
+                        notification.set_body(Some(&new_mail_notification_body(
                             count,
-                            if count == 1 { "" } else { "s" },
-                            account_name,
+                            &folder_name,
+                            &account_name,
                         )));
-                        let notification_target = glib::Variant::from(account_id.0.as_str());
+                        let notification_target =
+                            (account_id.0.as_str(), folder_id.0.as_str()).to_variant();
                         notification.set_default_action_and_target_value(
-                            "app.show-account",
+                            crate::config::DETAILED_ACTION_SHOW_FOLDER,
                             Some(&notification_target),
                         );
                         if let Some(application) = parent_for_events.application() {
                             application.send_notification(
-                                Some(&format!("new-mail-{}", account_id.0)),
+                                Some(&format!("new-mail-{}-{}", account_id.0, folder_id.0)),
                                 &notification,
                             );
                         }
@@ -633,11 +630,27 @@ impl MainWindow {
             mailbox_controls,
             toast_overlay,
             pending_mailto,
+            pending_folder,
         }
     }
 
     pub fn present(&self) {
         self.inner.present();
+    }
+
+    pub fn show_folder(
+        &self,
+        account_id: crate::model::account::MailAccountId,
+        folder_id: FolderId,
+    ) {
+        *self.pending_folder.borrow_mut() = Some((account_id, folder_id));
+        apply_pending_folder(
+            &self.pending_folder,
+            &self.mailbox,
+            &self.account_dropdown,
+            &self.sidebar,
+        );
+        self.compose_page.request_back();
     }
 
     pub fn replace_mailbox(&self, mailbox: MailboxViewModel) {
@@ -660,6 +673,12 @@ impl MainWindow {
         }
         rebuild_sidebar(&self.mailbox, &self.sidebar);
         rebuild_thread_panel(&self.mailbox, &self.thread_panel);
+        apply_pending_folder(
+            &self.pending_folder,
+            &self.mailbox,
+            &self.account_dropdown,
+            &self.sidebar,
+        );
         queue_current_account_refresh(&self.mailbox, &self.cache);
         self.mailbox_controls.update(&self.mailbox.borrow());
         self.present_pending_mailto();
@@ -765,6 +784,16 @@ fn notification_belongs_to_active_account(
     active_account_id == Some(event_account_id)
 }
 
+fn new_mail_notification_body(count: usize, folder_name: &str, account_name: &str) -> String {
+    format!(
+        "{} new conversation{} in {} — {}",
+        count,
+        if count == 1 { "" } else { "s" },
+        folder_name,
+        account_name,
+    )
+}
+
 fn dispatch_message_action(
     cache: &CacheManager,
     request: Option<crate::ui::mailbox::MessageActionRequest>,
@@ -845,6 +874,50 @@ pub(super) fn refresh_account_dropdown(dropdown: &gtk::DropDown, mailbox: &Mailb
     let _notifications = dropdown.freeze_notify();
     dropdown.set_model(Some(&model));
     dropdown.set_selected(mailbox.selected_account as u32);
+}
+
+fn apply_pending_folder(
+    pending: &Rc<RefCell<Option<(crate::model::account::MailAccountId, FolderId)>>>,
+    state: &Rc<RefCell<MailboxViewModel>>,
+    account_dropdown: &gtk::DropDown,
+    sidebar: &SidebarWidgets,
+) {
+    let Some((account_id, folder_id)) = pending.borrow().clone() else {
+        return;
+    };
+
+    let (current_account_id, account_index, loading) = {
+        let mailbox = state.borrow();
+        (
+            mailbox.current_account_id(),
+            mailbox.account_index(&account_id),
+            mailbox.is_loading(),
+        )
+    };
+    if current_account_id.as_ref() != Some(&account_id) {
+        if account_dropdown.is_sensitive()
+            && let Some(index) = account_index
+        {
+            account_dropdown.set_selected(index as u32);
+        } else if !loading && account_index.is_none() {
+            pending.borrow_mut().take();
+        }
+        return;
+    }
+    if loading {
+        return;
+    }
+
+    let folder_index = state
+        .borrow()
+        .folders
+        .iter()
+        .position(|folder| folder.id == folder_id);
+    if let Some(row) = folder_index.and_then(|index| sidebar.folder_list.row_at_index(index as i32))
+    {
+        pending.borrow_mut().take();
+        sidebar.folder_list.select_row(Some(&row));
+    }
 }
 
 fn build_sidebar(
@@ -2099,7 +2172,10 @@ fn attachment_preview_subtitle(uri: &str) -> &str {
 
 #[cfg(test)]
 mod tests {
-    use super::{folder_icon_name, notification_belongs_to_active_account, thread_subject_label};
+    use super::{
+        folder_icon_name, new_mail_notification_body, notification_belongs_to_active_account,
+        thread_subject_label,
+    };
     use crate::model::account::MailAccountId;
     use crate::model::mail::{ConversationId, ConversationSummary, FolderKind};
 
@@ -2157,5 +2233,17 @@ mod tests {
             &inactive,
         ));
         assert!(!notification_belongs_to_active_account(None, &active));
+    }
+
+    #[test]
+    fn notification_text_names_its_folder_and_aggregated_conversation_count() {
+        assert_eq!(
+            new_mail_notification_body(1, "Receipts", "Work"),
+            "1 new conversation in Receipts — Work"
+        );
+        assert_eq!(
+            new_mail_notification_body(5, "Archive", "Personal"),
+            "5 new conversations in Archive — Personal"
+        );
     }
 }

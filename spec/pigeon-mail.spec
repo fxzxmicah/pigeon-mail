@@ -1,5 +1,5 @@
 Name:           pigeon-mail
-Version:        0.1.1
+Version:        0.1.2
 Release:        1%{?dist}
 Summary:        GNOME email client using Evolution Data Server
 URL:            https://github.com/fxzxmicah/pigeon-mail
@@ -75,6 +75,11 @@ glib-compile-schemas --strict --dry-run %{buildroot}%{_datadir}/glib-2.0/schemas
 %{_datadir}/icons/hicolor/scalable/apps/org.gnome.pigeon.svg
 
 %changelog
+* Sun Aug 23 2026 Fxzx micah <48860358+fxzxmicah@users.noreply.github.com> - 0.1.2-1
+- Scan every mail folder for notifications and open the real source folder
+- Keep cached conversation flags and folder counts consistent
+- Tighten application and cache backend boundaries
+
 * Sun Aug 23 2026 Fxzx micah <48860358+fxzxmicah@users.noreply.github.com> - 0.1.1-1
 - Fix desktop Compose activation and mailto URI handling
 - Keep Compose and mailto available in stub sessions

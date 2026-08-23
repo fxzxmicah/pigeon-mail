@@ -15,7 +15,7 @@ Server and Camel, so reading and common message actions remain cache-first.
 - Reply, reply-all, forward, aliases, Reply-To addresses, and signatures
 - Attachment viewing and sending
 - Manual draft saving and a durable local outbox for deferred delivery
-- Desktop notifications for new unread mail in the active account
+- Desktop notifications for new unread mail in every folder of the active account
 - `mailto:` integration and a reusable full-window composer
 - A non-persistent stub mailbox when no eligible account is available
 

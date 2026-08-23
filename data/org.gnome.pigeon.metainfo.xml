@@ -31,6 +31,11 @@
   </categories>
   <content_rating type="oars-1.1"/>
   <releases>
+    <release version="0.1.2" date="2026-08-23">
+      <description>
+        <p>Notify from every mail folder, open the real source folder, and improve cached mailbox consistency.</p>
+      </description>
+    </release>
     <release version="0.1.1" date="2026-08-23">
       <description>
         <p>Fix desktop Compose activation, mailto URI handling, and stub composition.</p>

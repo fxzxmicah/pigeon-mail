@@ -74,6 +74,8 @@ pub enum CacheEvent {
     },
     NewMailAvailable {
         account_id: MailAccountId,
+        folder_id: FolderId,
+        folder_name: String,
         count: usize,
     },
     MailboxCacheChanged {
@@ -156,8 +158,18 @@ impl CacheEvent {
         Self::MailboxCacheChanged { account_id }
     }
 
-    pub fn new_mail(account_id: MailAccountId, count: usize) -> Self {
-        Self::NewMailAvailable { account_id, count }
+    pub fn new_mail(
+        account_id: MailAccountId,
+        folder_id: FolderId,
+        folder_name: String,
+        count: usize,
+    ) -> Self {
+        Self::NewMailAvailable {
+            account_id,
+            folder_id,
+            folder_name,
+            count,
+        }
     }
 
     pub fn message_detail(
@@ -350,11 +362,20 @@ mod tests {
             CacheEvent::MailboxCacheChanged { .. }
         ));
         assert!(matches!(
-            CacheEvent::new_mail(account_id.clone(), 2),
+            CacheEvent::new_mail(
+                account_id.clone(),
+                FolderId("receipts".into()),
+                "Receipts".into(),
+                2,
+            ),
             CacheEvent::NewMailAvailable {
                 account_id,
+                folder_id,
+                folder_name,
                 count: 2,
             } if account_id.0 == "account-1"
+                && folder_id.0 == "receipts"
+                && folder_name == "Receipts"
         ));
         assert!(matches!(
             CacheEvent::thread_page(7, account_id.clone(), folder_id, 50, Ok(Vec::new())),

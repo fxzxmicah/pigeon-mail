@@ -8,7 +8,8 @@ use std::time::{Duration, Instant};
 
 use crate::app::accounts::AccountRuntime;
 use crate::integration::backend::stub_backend;
-use crate::model::mail::MailtoRequest;
+use crate::model::account::MailAccountId;
+use crate::model::mail::{FolderId, MailtoRequest};
 use crate::ui::mailbox::{MailboxViewModel, MainWindow};
 
 struct RegistryChanges {
@@ -40,14 +41,24 @@ impl ApplicationSession {
         }
     }
 
+    fn window(&self, app: &adw::Application) -> MainWindow {
+        ensure_main_window(app, &self.window, &self.runtime)
+    }
+
     fn present(&self, app: &adw::Application) -> MainWindow {
-        let window = ensure_main_window(app, &self.window, &self.runtime);
+        let window = self.window(app);
         window.present();
         window
     }
 
     fn compose(&self, app: &adw::Application, request: MailtoRequest) {
         self.present(app).open_mailto(request);
+    }
+
+    fn show_folder(&self, app: &adw::Application, account_id: MailAccountId, folder_id: FolderId) {
+        let window = self.window(app);
+        window.show_folder(account_id, folder_id);
+        window.present();
     }
 
     fn save(&self) {
@@ -73,16 +84,7 @@ fn build_application() -> adw::Application {
     app.set_accels_for_action("win.preferences", &["<Primary>comma"]);
     app.set_accels_for_action("win.back", &["<Alt>Left"]);
     let session = Rc::new(ApplicationSession::new());
-
-    let app_for_compose = app.downgrade();
-    let session_for_compose = Rc::clone(&session);
-    let compose_action = gio::SimpleAction::new("compose", None);
-    compose_action.connect_activate(move |_, _| {
-        if let Some(app) = app_for_compose.upgrade() {
-            session_for_compose.compose(&app, Default::default());
-        }
-    });
-    app.add_action(&compose_action);
+    install_actions(&app, &session);
 
     app.connect_startup(|_| {
         load_app_css();
@@ -116,6 +118,40 @@ fn build_application() -> adw::Application {
     });
 
     app
+}
+
+fn install_actions(app: &adw::Application, session: &Rc<ApplicationSession>) {
+    let app_for_compose = app.downgrade();
+    let session_for_compose = Rc::clone(session);
+    let compose_action = gio::SimpleAction::new(crate::config::ACTION_COMPOSE, None);
+    compose_action.connect_activate(move |_, _| {
+        if let Some(app) = app_for_compose.upgrade() {
+            session_for_compose.compose(&app, Default::default());
+        }
+    });
+    app.add_action(&compose_action);
+
+    let app_for_show_folder = app.downgrade();
+    let session_for_show_folder = Rc::clone(session);
+    let show_folder_action = gio::SimpleAction::new(
+        crate::config::ACTION_SHOW_FOLDER,
+        Some(glib::VariantTy::new("(ss)").expect("valid folder action parameter type")),
+    );
+    show_folder_action.connect_activate(move |_, parameter| {
+        let Some((account_id, folder_id)) =
+            parameter.and_then(|value| value.get::<(String, String)>())
+        else {
+            return;
+        };
+        if let Some(app) = app_for_show_folder.upgrade() {
+            session_for_show_folder.show_folder(
+                &app,
+                MailAccountId(account_id),
+                FolderId(folder_id),
+            );
+        }
+    });
+    app.add_action(&show_folder_action);
 }
 
 fn parse_mailto_open_uri(uri: &str) -> anyhow::Result<MailtoRequest> {
@@ -318,5 +354,47 @@ mod tests {
         assert!(parse_mailto_open_uri("https:///example.test").is_err());
         assert!(parse_mailto_open_uri("mailto://////person@example.test").is_err());
         assert!(parse_mailto_open_uri("mailto://///person@example.test/").is_err());
+    }
+
+    #[test]
+    fn desktop_compose_and_dbus_service_match_application_actions() {
+        let desktop_entry = include_str!("../../data/org.gnome.pigeon.desktop");
+        let service = include_str!("../../data/org.gnome.pigeon.service.in");
+        let action_group = format!("[Desktop Action {}]", crate::config::ACTION_COMPOSE);
+
+        assert_eq!(
+            crate::config::DETAILED_ACTION_SHOW_FOLDER,
+            format!("app.{}", crate::config::ACTION_SHOW_FOLDER)
+        );
+
+        assert!(desktop_entry.lines().any(|line| {
+            line.strip_prefix("Actions=").is_some_and(|actions| {
+                actions
+                    .split(';')
+                    .any(|name| name == crate::config::ACTION_COMPOSE)
+            })
+        }));
+        assert!(
+            desktop_entry
+                .lines()
+                .any(|line| line == action_group.as_str())
+        );
+        assert!(
+            desktop_entry
+                .lines()
+                .any(|line| line == "Exec=pigeon mailto:")
+        );
+        assert!(
+            desktop_entry
+                .lines()
+                .any(|line| line == "DBusActivatable=true")
+        );
+        let service_name = format!("Name={}", crate::config::APP_ID);
+        assert!(service.lines().any(|line| line == service_name.as_str()));
+        assert!(
+            service
+                .lines()
+                .any(|line| line == "Exec=@bindir@/pigeon --gapplication-service")
+        );
     }
 }

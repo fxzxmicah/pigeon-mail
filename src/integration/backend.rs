@@ -556,14 +556,7 @@ impl Backend {
         self.pending_mail_actions
             .apply_move_overlay(account_id, &mut conversations);
         drop(conversations);
-
-        let mut folders = self
-            .cached_folders
-            .lock()
-            .expect("folder cache lock poisoned");
-        if let Some(folders) = folders.get_mut(&account_id.0) {
-            update_folder_unread_counts(account_id, folders, &self.cached_conversations);
-        }
+        self.refresh_cached_folder_counts(account_id);
     }
 
     fn apply_pending_flag_overlay(&self, account_id: &MailAccountId) {
@@ -574,12 +567,60 @@ impl Backend {
         self.pending_mail_actions
             .apply_flag_overlay(account_id, &mut conversations);
         drop(conversations);
+        self.refresh_cached_folder_counts(account_id);
+    }
+
+    fn update_cached_conversation(
+        &self,
+        account_id: &MailAccountId,
+        conversation_id: &ConversationId,
+        update: impl Fn(&mut ConversationSummary),
+    ) {
+        let mut conversations = self
+            .cached_conversations
+            .lock()
+            .expect("conversation cache lock poisoned");
+        let mut changed = false;
+        for ((cached_account_id, _), summaries) in conversations.iter_mut() {
+            if cached_account_id == &account_id.0
+                && let Some(summary) = summaries
+                    .iter_mut()
+                    .find(|summary| summary.id == *conversation_id)
+            {
+                update(summary);
+                changed = true;
+            }
+        }
+        drop(conversations);
+        if changed {
+            self.refresh_cached_folder_counts(account_id);
+        }
+    }
+
+    fn refresh_cached_folder_counts(&self, account_id: &MailAccountId) {
+        let unread_counts = self
+            .cached_conversations
+            .lock()
+            .expect("conversation cache lock poisoned")
+            .iter()
+            .filter(|((cached_account_id, _), _)| cached_account_id == &account_id.0)
+            .map(|((_, folder_id), summaries)| {
+                (
+                    folder_id.clone(),
+                    summaries.iter().map(|summary| summary.unread_count).sum(),
+                )
+            })
+            .collect::<HashMap<_, _>>();
         let mut folders = self
             .cached_folders
             .lock()
             .expect("folder cache lock poisoned");
         if let Some(folders) = folders.get_mut(&account_id.0) {
-            update_folder_unread_counts(account_id, folders, &self.cached_conversations);
+            for folder in folders {
+                if let Some(unread_count) = unread_counts.get(&folder.id.0) {
+                    folder.unread_count = *unread_count;
+                }
+            }
         }
     }
 
@@ -1285,21 +1326,6 @@ fn merge_local_drafts_folder_view(mut folders: Vec<MailFolder>) -> Vec<MailFolde
     folders
 }
 
-fn update_folder_unread_counts(
-    account_id: &MailAccountId,
-    folders: &mut [MailFolder],
-    cached_conversations: &Mutex<HashMap<(String, String), Vec<ConversationSummary>>>,
-) {
-    let conversations = cached_conversations
-        .lock()
-        .expect("conversation cache lock poisoned");
-    for folder in folders {
-        if let Some(summaries) = conversations.get(&(account_id.0.clone(), folder.id.0.clone())) {
-            folder.unread_count = summaries.iter().map(|summary| summary.unread_count).sum();
-        }
-    }
-}
-
 fn append_draft_via_local_eds_cache(
     folder_uri: &str,
     from: &str,
@@ -1878,7 +1904,6 @@ impl MailBackend for Backend {
         conversation_id: &ConversationId,
         starred: bool,
     ) -> BoxFuture<'_, anyhow::Result<()>> {
-        let cached_conversations = Arc::clone(&self.cached_conversations);
         let account_id = account_id.clone();
         let conversation_id = conversation_id.clone();
         let eds_binding = self.live_binding(&account_id);
@@ -1903,19 +1928,9 @@ impl MailBackend for Backend {
                         starred,
                     )?;
                 }
-                let mut cache = cached_conversations
-                    .lock()
-                    .expect("conversation cache lock poisoned");
-                for ((cached_account_id, _), conversations) in cache.iter_mut() {
-                    if cached_account_id != &account_id.0 {
-                        continue;
-                    }
-                    for conversation in conversations.iter_mut() {
-                        if conversation.id == conversation_id {
-                            conversation.starred = starred;
-                        }
-                    }
-                }
+                this.update_cached_conversation(&account_id, &conversation_id, |conversation| {
+                    conversation.starred = starred;
+                });
             }
             Ok(())
         })
@@ -1927,7 +1942,6 @@ impl MailBackend for Backend {
         conversation_id: &ConversationId,
         read: bool,
     ) -> BoxFuture<'_, anyhow::Result<()>> {
-        let cached_conversations = Arc::clone(&self.cached_conversations);
         let account_id = account_id.clone();
         let conversation_id = conversation_id.clone();
         let eds_binding = self.live_binding(&account_id);
@@ -1952,19 +1966,9 @@ impl MailBackend for Backend {
                         read,
                     )?;
                 }
-                let mut cache = cached_conversations
-                    .lock()
-                    .expect("conversation cache lock poisoned");
-                for ((cached_account_id, _), conversations) in cache.iter_mut() {
-                    if cached_account_id != &account_id.0 {
-                        continue;
-                    }
-                    for conversation in conversations.iter_mut() {
-                        if conversation.id == conversation_id {
-                            conversation.unread_count = if read { 0 } else { 1 };
-                        }
-                    }
-                }
+                this.update_cached_conversation(&account_id, &conversation_id, |conversation| {
+                    conversation.unread_count = if read { 0 } else { 1 };
+                });
             }
             Ok(())
         })
@@ -2188,7 +2192,9 @@ mod tests {
     };
     use crate::integration::registry::Snapshot;
     use crate::model::account::{AliasId, MailAccount, MailAccountId, SendingIdentity};
-    use crate::model::mail::{ConversationId, ConversationSummary, DraftMessage, FolderId};
+    use crate::model::mail::{
+        ConversationId, ConversationSummary, DraftMessage, FolderId, FolderKind, MailFolder,
+    };
 
     fn registry_entry(uid: &str, goa_id: &str) -> crate::integration::registry::Source {
         crate::integration::registry::Source {
@@ -2403,6 +2409,64 @@ mod tests {
         assert!(summary_contains_query(&summary, "LAUNCH"));
         assert!(summary_contains_query(&summary, "person@example.com"));
         assert!(!summary_contains_query(&summary, "missing"));
+    }
+
+    #[test]
+    fn cached_summary_updates_are_account_scoped_and_refresh_folder_counts() {
+        let backend = Backend::from_accounts(&[], Vec::new());
+        let first_account = MailAccountId("account-1".into());
+        let second_account = MailAccountId("account-2".into());
+        let folder_id = FolderId("inbox".into());
+        let conversation_id = ConversationId("inbox\u{1f}message-1".into());
+        let summary = ConversationSummary {
+            id: conversation_id.clone(),
+            subject: "Account-scoped cache".into(),
+            participants: vec!["Person <person@example.test>".into()],
+            message_count: 1,
+            unread_count: 1,
+            attachment_count: 0,
+            starred: false,
+            last_updated_unix_ms: 0,
+            preview: "Cache state".into(),
+        };
+        let folder = MailFolder {
+            id: folder_id.clone(),
+            name: "Inbox".into(),
+            unread_count: 1,
+            kind: FolderKind::Inbox,
+        };
+        backend.cached_folders.lock().unwrap().extend([
+            (first_account.0.clone(), vec![folder.clone()]),
+            (second_account.0.clone(), vec![folder]),
+        ]);
+        backend.cached_conversations.lock().unwrap().extend([
+            (
+                (first_account.0.clone(), folder_id.0.clone()),
+                vec![summary.clone()],
+            ),
+            (
+                (second_account.0.clone(), folder_id.0.clone()),
+                vec![summary],
+            ),
+        ]);
+
+        backend.update_cached_conversation(&first_account, &conversation_id, |conversation| {
+            conversation.unread_count = 0
+        });
+
+        let folders = backend.cached_folders.lock().unwrap();
+        assert_eq!(folders[&first_account.0][0].unread_count, 0);
+        assert_eq!(folders[&second_account.0][0].unread_count, 1);
+        drop(folders);
+        let conversations = backend.cached_conversations.lock().unwrap();
+        assert_eq!(
+            conversations[&(first_account.0, folder_id.0.clone())][0].unread_count,
+            0
+        );
+        assert_eq!(
+            conversations[&(second_account.0, folder_id.0)][0].unread_count,
+            1
+        );
     }
 
     #[test]

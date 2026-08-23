@@ -10,7 +10,7 @@ use crate::model::event::{
     AccountMailboxSnapshot, AttachmentDisposition, CacheEvent, ComposeOperation,
     MailboxContentSnapshot, MessageAction,
 };
-use crate::model::mail::{ConversationId, ConversationSummary, DraftMessage, FolderId, FolderKind};
+use crate::model::mail::{ConversationId, ConversationSummary, DraftMessage, FolderId};
 
 const NOTIFICATION_SNAPSHOT_LIMIT: usize = 256;
 
@@ -26,7 +26,8 @@ struct CacheManagerState {
     account_refreshes: Mutex<HashMap<MailAccountId, Option<AccountRefreshJob>>>,
     account_searches: LatestJobQueue<MailAccountId, SearchJob>,
     message_details: LatestJobQueue<MailAccountId, MessageDetailJob>,
-    inbox_baselines: Mutex<HashMap<MailAccountId, HashMap<ConversationId, i64>>>,
+    notification_baselines:
+        Mutex<HashMap<MailAccountId, HashMap<FolderId, HashMap<ConversationId, i64>>>>,
     remote_change_accounts: Mutex<HashSet<MailAccountId>>,
     change_monitor: Mutex<ChangeMonitorState>,
 }
@@ -55,6 +56,24 @@ struct MessageDetailJob {
 #[derive(Clone)]
 struct AccountRefreshJob {
     service: MailService,
+}
+
+struct FolderNotificationSnapshot {
+    folder_id: FolderId,
+    folder_name: String,
+    conversations: Vec<ConversationSummary>,
+}
+
+struct NotificationSnapshot {
+    folder_ids: HashSet<FolderId>,
+    folders: Vec<FolderNotificationSnapshot>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct FolderNotification {
+    folder_id: FolderId,
+    folder_name: String,
+    count: usize,
 }
 
 struct LatestJobQueue<K, J> {
@@ -126,7 +145,7 @@ impl CacheManager {
                 account_refreshes: Mutex::new(HashMap::new()),
                 account_searches: LatestJobQueue::new(),
                 message_details: LatestJobQueue::new(),
-                inbox_baselines: Mutex::new(HashMap::new()),
+                notification_baselines: Mutex::new(HashMap::new()),
                 remote_change_accounts: Mutex::new(HashSet::new()),
                 change_monitor: Mutex::new(ChangeMonitorState::default()),
             }),
@@ -208,16 +227,17 @@ impl CacheManager {
             let failure =
                 match futures::executor::block_on(job.service.refresh_account(&account_id)) {
                     Ok(()) if manager.is_fully_active_account(&account_id) => {
-                        match futures::executor::block_on(load_inbox_snapshot(
+                        match futures::executor::block_on(load_notification_snapshot(
                             &job.service,
                             &account_id,
                         )) {
                             Ok(snapshot) => {
-                                let new_mail = manager.observe_inbox(&account_id, snapshot);
-                                if new_mail > 0 {
+                                for notification in manager.observe_folders(&account_id, snapshot) {
                                     manager.publish(CacheEvent::new_mail(
                                         account_id.clone(),
-                                        new_mail,
+                                        notification.folder_id,
+                                        notification.folder_name,
+                                        notification.count,
                                     ));
                                 }
                             }
@@ -687,33 +707,50 @@ impl CacheManager {
             .flatten()
     }
 
-    fn observe_inbox(
+    fn observe_folders(
         &self,
         account_id: &MailAccountId,
-        conversations: Vec<ConversationSummary>,
-    ) -> usize {
-        let current = conversations
-            .iter()
-            .map(|summary| (summary.id.clone(), summary.last_updated_unix_ms))
-            .collect::<HashMap<_, _>>();
+        snapshot: NotificationSnapshot,
+    ) -> Vec<FolderNotification> {
         let mut baselines = self
             .state
-            .inbox_baselines
+            .notification_baselines
             .lock()
-            .expect("inbox baseline lock poisoned");
-        let previous = baselines.insert(account_id.clone(), current.clone());
-        let Some(previous) = previous else {
-            return 0;
-        };
-        conversations
-            .into_iter()
-            .filter(|summary| {
-                summary.unread_count > 0
-                    && previous
-                        .get(&summary.id)
-                        .is_none_or(|known| summary.last_updated_unix_ms > *known)
-            })
-            .count()
+            .expect("notification baseline lock poisoned");
+        let mut current = baselines.remove(account_id).unwrap_or_default();
+        current.retain(|folder_id, _| snapshot.folder_ids.contains(folder_id));
+        let mut notifications = Vec::new();
+
+        for folder in snapshot.folders {
+            let folder_baseline = folder
+                .conversations
+                .iter()
+                .map(|summary| (summary.id.clone(), summary.last_updated_unix_ms))
+                .collect::<HashMap<_, _>>();
+            if let Some(previous_folder) = current.get(&folder.folder_id) {
+                let count = folder
+                    .conversations
+                    .iter()
+                    .filter(|summary| {
+                        summary.unread_count > 0
+                            && previous_folder
+                                .get(&summary.id)
+                                .is_none_or(|known| summary.last_updated_unix_ms > *known)
+                    })
+                    .count();
+                if count > 0 {
+                    notifications.push(FolderNotification {
+                        folder_id: folder.folder_id.clone(),
+                        folder_name: folder.folder_name,
+                        count,
+                    });
+                }
+            }
+            current.insert(folder.folder_id, folder_baseline);
+        }
+
+        baselines.insert(account_id.clone(), current);
+        notifications
     }
 }
 
@@ -744,21 +781,34 @@ impl RemoteChangePublisher {
     }
 }
 
-async fn load_inbox_snapshot(
+async fn load_notification_snapshot(
     mail_service: &MailService,
     account_id: &MailAccountId,
-) -> anyhow::Result<Vec<ConversationSummary>> {
+) -> anyhow::Result<NotificationSnapshot> {
     let folders = mail_service.list_folders(account_id).await?;
-    let Some(inbox) = folders
-        .iter()
-        .find(|folder| folder.kind == FolderKind::Inbox)
-    else {
-        return Ok(Vec::new());
-    };
-    let conversations = mail_service
-        .list_conversations(account_id, &inbox.id, 0, NOTIFICATION_SNAPSHOT_LIMIT)
-        .await?;
-    Ok(conversations)
+    let folder_ids = folders.iter().map(|folder| folder.id.clone()).collect();
+    let mut snapshots = Vec::with_capacity(folders.len());
+    for folder in folders {
+        let conversations = match mail_service
+            .list_conversations(account_id, &folder.id, 0, NOTIFICATION_SNAPSHOT_LIMIT)
+            .await
+        {
+            Ok(conversations) => conversations,
+            Err(error) => {
+                crate::logging::report_deferred("new-mail-folder-snapshot", &error);
+                continue;
+            }
+        };
+        snapshots.push(FolderNotificationSnapshot {
+            folder_id: folder.id,
+            folder_name: folder.name,
+            conversations,
+        });
+    }
+    Ok(NotificationSnapshot {
+        folder_ids,
+        folders: snapshots,
+    })
 }
 
 impl AccountRefresh {
@@ -788,7 +838,7 @@ impl Drop for AccountRefresh {
 mod tests {
     use super::*;
 
-    fn inbox_summary(id: &str, updated: i64, unread: u32) -> ConversationSummary {
+    fn summary(id: &str, updated: i64, unread: u32) -> ConversationSummary {
         ConversationSummary {
             id: ConversationId(id.into()),
             subject: String::new(),
@@ -799,6 +849,28 @@ mod tests {
             starred: false,
             last_updated_unix_ms: updated,
             preview: String::new(),
+        }
+    }
+
+    fn folder(
+        id: &str,
+        name: &str,
+        conversations: Vec<ConversationSummary>,
+    ) -> FolderNotificationSnapshot {
+        FolderNotificationSnapshot {
+            folder_id: FolderId(id.into()),
+            folder_name: name.into(),
+            conversations,
+        }
+    }
+
+    fn snapshot(folders: Vec<FolderNotificationSnapshot>) -> NotificationSnapshot {
+        NotificationSnapshot {
+            folder_ids: folders
+                .iter()
+                .map(|folder| folder.folder_id.clone())
+                .collect(),
+            folders,
         }
     }
 
@@ -817,84 +889,187 @@ mod tests {
     }
 
     #[test]
-    fn inbox_observation_seeds_silently_then_detects_only_new_unread_activity() {
+    fn folder_observation_seeds_silently_then_reports_each_source_folder() {
         let manager = CacheManager::new();
         let account_id = MailAccountId("account-1".into());
 
+        assert!(
+            manager
+                .observe_folders(
+                    &account_id,
+                    snapshot(vec![
+                        folder(
+                            "inbox",
+                            "Inbox",
+                            vec![summary("shared", 10, 1), summary("flag-only", 10, 0)],
+                        ),
+                        folder("custom", "Receipts", vec![summary("shared", 10, 1)]),
+                        folder("archive", "Archive", Vec::new()),
+                    ]),
+                )
+                .is_empty()
+        );
+
         assert_eq!(
-            manager.observe_inbox(
+            manager.observe_folders(
                 &account_id,
-                vec![
-                    inbox_summary("known", 10, 1),
-                    inbox_summary("already-read", 10, 0),
-                ],
+                snapshot(vec![
+                    folder(
+                        "inbox",
+                        "Inbox",
+                        vec![
+                            summary("shared", 10, 0),
+                            summary("flag-only", 10, 1),
+                            summary("read", 20, 0),
+                        ],
+                    ),
+                    folder("custom", "Receipts", vec![summary("shared", 20, 1)],),
+                    folder(
+                        "archive",
+                        "Archive",
+                        vec![summary("new", 30, 1), summary("second", 30, 1),],
+                    ),
+                ]),
             ),
-            0
+            vec![
+                FolderNotification {
+                    folder_id: FolderId("custom".into()),
+                    folder_name: "Receipts".into(),
+                    count: 1,
+                },
+                FolderNotification {
+                    folder_id: FolderId("archive".into()),
+                    folder_name: "Archive".into(),
+                    count: 2,
+                },
+            ]
         );
-        assert_eq!(
-            manager.observe_inbox(&account_id, vec![inbox_summary("known", 10, 0)],),
-            0
-        );
-        assert_eq!(
-            manager.observe_inbox(&account_id, vec![inbox_summary("known", 10, 1)],),
-            0
-        );
-        assert_eq!(
-            manager.observe_inbox(
-                &account_id,
-                vec![
-                    inbox_summary("known", 10, 1),
-                    inbox_summary("new-read", 20, 0),
-                ],
-            ),
-            0
-        );
-        assert_eq!(
-            manager.observe_inbox(
-                &account_id,
-                vec![
-                    inbox_summary("known", 30, 1),
-                    inbox_summary("new-unread", 20, 1),
-                ],
-            ),
-            2
-        );
-        assert_eq!(
-            manager.observe_inbox(
-                &account_id,
-                vec![
-                    inbox_summary("known", 30, 1),
-                    inbox_summary("new-unread", 20, 1),
-                ],
-            ),
-            0
+        assert!(
+            manager
+                .observe_folders(
+                    &account_id,
+                    snapshot(vec![
+                        folder(
+                            "inbox",
+                            "Inbox",
+                            vec![summary("shared", 10, 0), summary("flag-only", 10, 1)],
+                        ),
+                        folder("custom", "Receipts", vec![summary("shared", 20, 1)],),
+                        folder(
+                            "archive",
+                            "Archive",
+                            vec![summary("new", 30, 1), summary("second", 30, 1),],
+                        ),
+                    ]),
+                )
+                .is_empty()
         );
     }
 
     #[test]
-    fn inbox_observation_is_scoped_per_account() {
+    fn folder_observation_is_scoped_per_account_and_forgets_absent_folders() {
         let manager = CacheManager::new();
 
-        assert_eq!(
-            manager.observe_inbox(
-                &MailAccountId("account-1".into()),
-                vec![inbox_summary("shared-id", 10, 1)],
-            ),
-            0
+        assert!(
+            manager
+                .observe_folders(
+                    &MailAccountId("account-1".into()),
+                    snapshot(vec![folder(
+                        "custom",
+                        "Custom",
+                        vec![summary("shared", 10, 1)],
+                    )]),
+                )
+                .is_empty()
+        );
+        assert!(
+            manager
+                .observe_folders(
+                    &MailAccountId("account-2".into()),
+                    snapshot(vec![folder(
+                        "custom",
+                        "Custom",
+                        vec![summary("shared", 20, 1)],
+                    )]),
+                )
+                .is_empty()
+        );
+        assert!(
+            manager
+                .observe_folders(&MailAccountId("account-1".into()), snapshot(Vec::new()),)
+                .is_empty()
+        );
+        assert!(
+            manager
+                .observe_folders(
+                    &MailAccountId("account-1".into()),
+                    snapshot(vec![folder(
+                        "custom",
+                        "Custom",
+                        vec![summary("shared", 30, 1)],
+                    )]),
+                )
+                .is_empty()
         );
         assert_eq!(
-            manager.observe_inbox(
+            manager.observe_folders(
                 &MailAccountId("account-2".into()),
-                vec![inbox_summary("shared-id", 20, 1)],
+                snapshot(vec![folder(
+                    "custom",
+                    "Custom",
+                    vec![summary("shared", 30, 1)],
+                )]),
             ),
-            0
+            vec![FolderNotification {
+                folder_id: FolderId("custom".into()),
+                folder_name: "Custom".into(),
+                count: 1,
+            }]
+        );
+    }
+
+    #[test]
+    fn failed_folder_read_preserves_its_last_successful_baseline() {
+        let manager = CacheManager::new();
+        let account_id = MailAccountId("account-1".into());
+
+        assert!(
+            manager
+                .observe_folders(
+                    &account_id,
+                    snapshot(vec![folder(
+                        "custom",
+                        "Custom",
+                        vec![summary("known", 10, 1)],
+                    )]),
+                )
+                .is_empty()
+        );
+        assert!(
+            manager
+                .observe_folders(
+                    &account_id,
+                    NotificationSnapshot {
+                        folder_ids: [FolderId("custom".into())].into_iter().collect(),
+                        folders: Vec::new(),
+                    },
+                )
+                .is_empty()
         );
         assert_eq!(
-            manager.observe_inbox(
-                &MailAccountId("account-1".into()),
-                vec![inbox_summary("shared-id", 20, 1)],
+            manager.observe_folders(
+                &account_id,
+                snapshot(vec![folder(
+                    "custom",
+                    "Custom",
+                    vec![summary("known", 20, 1)],
+                )]),
             ),
-            1
+            vec![FolderNotification {
+                folder_id: FolderId("custom".into()),
+                folder_name: "Custom".into(),
+                count: 1,
+            }]
         );
     }
 
