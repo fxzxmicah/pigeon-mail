@@ -71,6 +71,16 @@ impl MailService {
             .await
     }
 
+    pub async fn cached_message_detail(
+        &self,
+        account_id: &MailAccountId,
+        conversation_id: &ConversationId,
+    ) -> anyhow::Result<Option<MessageDetail>> {
+        self.backend
+            .get_cached_message_detail(account_id, conversation_id)
+            .await
+    }
+
     pub async fn open_attachment(
         &self,
         account_id: &MailAccountId,

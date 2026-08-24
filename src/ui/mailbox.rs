@@ -276,7 +276,7 @@ impl MainWindow {
             .search_entry
             .connect_search_changed(move |entry| {
                 if let Some(account_id) = state_for_search.borrow().current_account_id() {
-                    cache_for_search.cancel_pending_message_detail(&account_id);
+                    cache_for_search.cancel_message_detail_requests(&account_id);
                 }
                 let request = state_for_search.borrow_mut().search(entry.text().as_str());
                 if let Some(request) = request {
@@ -656,7 +656,7 @@ impl MainWindow {
     pub fn replace_mailbox(&self, mailbox: MailboxViewModel) {
         if let Some(account_id) = self.mailbox.borrow().current_account_id() {
             self.cache.cancel_pending_search(&account_id);
-            self.cache.cancel_pending_message_detail(&account_id);
+            self.cache.cancel_message_detail_requests(&account_id);
         }
         *self.mailbox.borrow_mut() = mailbox;
         self.compose_page.mailbox_replaced();
@@ -837,7 +837,7 @@ fn build_account_dropdown(
         }
         if let Some(account_id) = state_for_change.borrow().current_account_id() {
             cache.cancel_pending_search(&account_id);
-            cache.cancel_pending_message_detail(&account_id);
+            cache.cancel_message_detail_requests(&account_id);
         }
         let activation = state_for_change
             .borrow_mut()
@@ -1002,7 +1002,7 @@ fn build_sidebar(
         }
 
         if let Some(account_id) = state_for_folder.borrow().current_account_id() {
-            cache.cancel_pending_message_detail(&account_id);
+            cache.cancel_message_detail_requests(&account_id);
         }
         let request = state_for_folder
             .borrow_mut()

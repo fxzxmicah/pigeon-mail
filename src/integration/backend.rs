@@ -224,6 +224,12 @@ pub trait MailBackend: Send + Sync + 'static {
         conversation_id: &ConversationId,
     ) -> BoxFuture<'_, anyhow::Result<Option<MessageDetail>>>;
 
+    fn get_cached_message_detail(
+        &self,
+        account_id: &MailAccountId,
+        conversation_id: &ConversationId,
+    ) -> BoxFuture<'_, anyhow::Result<Option<MessageDetail>>>;
+
     fn open_attachment(
         &self,
         account_id: &MailAccountId,
@@ -632,6 +638,27 @@ impl Backend {
         ));
         *cached_session = Some(Arc::clone(&session));
         Ok(session)
+    }
+
+    fn read_cached_message_detail(
+        &self,
+        account_id: &MailAccountId,
+        conversation_id: &ConversationId,
+    ) -> anyhow::Result<Option<MessageDetail>> {
+        let Some(binding) = self.live_binding(account_id) else {
+            return Ok(self.stub_store.message_detail(&conversation_id.0));
+        };
+
+        if is_local_conversation_id(&binding, conversation_id) {
+            let mut session =
+                crate::integration::camel::AccountSession::open_cached_source("local", "maildir")?;
+            refresh_local_conversation_folder(&mut session, conversation_id)?;
+            return session.get_message_detail(conversation_id);
+        }
+
+        let session = self.session_for_binding(&binding)?;
+        let mut session = session.lock().expect("camel session lock poisoned");
+        session.get_message_detail(conversation_id)
     }
 
     fn clear_live_cache(&self) {
@@ -1415,32 +1442,14 @@ impl MailBackend for Backend {
         Box::pin(async move {
             if let Some(binding) = eds_binding {
                 if is_local_conversation_id(&binding, &conversation_id) {
-                    let mut session =
-                        crate::integration::camel::AccountSession::open_online_source(
-                            "local", "maildir",
-                        )?;
-                    refresh_local_conversation_folder(&mut session, &conversation_id)?;
-                    return session.get_message_detail(&conversation_id);
+                    return this.read_cached_message_detail(&account_id, &conversation_id);
                 }
-                match this.session_for_binding(&binding) {
-                    Ok(session) => {
-                        let mut session = session.lock().expect("camel session lock poisoned");
-                        match session.get_message_detail(&conversation_id) {
-                            Ok(Some(detail)) => return Ok(Some(detail)),
-                            Ok(None) => {}
-                            Err(error) => {
-                                development_probe_log!(
-                                    "EDS/Camel detail load failed for conversation {}: {}",
-                                    conversation_id.0,
-                                    error
-                                );
-                                drop(error);
-                            }
-                        }
-                    }
+                match this.read_cached_message_detail(&account_id, &conversation_id) {
+                    Ok(Some(detail)) => return Ok(Some(detail)),
+                    Ok(None) => {}
                     Err(error) => {
                         development_probe_log!(
-                            "EDS/Camel session open failed while loading detail {}: {}",
+                            "EDS/Camel cached detail load failed for conversation {}: {}",
                             conversation_id.0,
                             error
                         );
@@ -1471,6 +1480,17 @@ impl MailBackend for Backend {
 
             Ok(store.message_detail(&conversation_id.0))
         })
+    }
+
+    fn get_cached_message_detail(
+        &self,
+        account_id: &MailAccountId,
+        conversation_id: &ConversationId,
+    ) -> BoxFuture<'_, anyhow::Result<Option<MessageDetail>>> {
+        let this = self.clone();
+        let account_id = account_id.clone();
+        let conversation_id = conversation_id.clone();
+        Box::pin(async move { this.read_cached_message_detail(&account_id, &conversation_id) })
     }
 
     fn open_attachment(

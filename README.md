@@ -52,6 +52,18 @@ Fedora is the primary development and packaging environment. See
 [`spec/pigeon-mail.spec`](spec/pigeon-mail.spec) for the authoritative RPM build
 requirements.
 
+### Microsoft 365 alias sending
+
+The Microsoft 365 transport in evolution-ews can replace an Outlook.com alias
+with the account's primary address when it submits raw MIME. A provider-side
+patch keeps primary-address delivery on the MIME path and uses the structured
+Microsoft 365 submission path for alternate sending identities.
+
+Fedora users can find `SOURCES/evolution-ews-send-from-alias.patch` in the
+[`fedora-rpm-rebuild` repository](https://github.com/fxzxmicah/fedora-rpm-rebuild).
+Apply it when rebuilding evolution-ews; Pigeon Mail itself continues to use
+EDS/Camel exclusively and does not connect to provider APIs directly.
+
 ## Build from source
 
 ```sh

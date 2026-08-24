@@ -206,6 +206,21 @@ impl MailBackend for BackendPool {
         })
     }
 
+    fn get_cached_message_detail(
+        &self,
+        account_id: &MailAccountId,
+        conversation_id: &ConversationId,
+    ) -> BoxFuture<'_, anyhow::Result<Option<MessageDetail>>> {
+        let backend = self.backend(account_id);
+        let account_id = account_id.clone();
+        let conversation_id = conversation_id.clone();
+        Box::pin(async move {
+            backend?
+                .get_cached_message_detail(&account_id, &conversation_id)
+                .await
+        })
+    }
+
     fn open_attachment(
         &self,
         account_id: &MailAccountId,

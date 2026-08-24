@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::hash::Hash;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak, mpsc};
 
 use crate::core::mail::MailService;
@@ -10,7 +11,9 @@ use crate::model::event::{
     AccountMailboxSnapshot, AttachmentDisposition, CacheEvent, MailboxContentSnapshot,
     MessageAction,
 };
-use crate::model::mail::{ConversationId, ConversationSummary, DraftMessage, FolderId};
+use crate::model::mail::{
+    ConversationId, ConversationSummary, DraftMessage, FolderId, MessageDetail,
+};
 
 const NOTIFICATION_SNAPSHOT_LIMIT: usize = 256;
 
@@ -25,7 +28,7 @@ struct CacheManagerState {
     fully_active_account: Mutex<Option<MailAccountId>>,
     account_refreshes: Mutex<HashMap<MailAccountId, Option<AccountRefreshJob>>>,
     account_searches: LatestJobQueue<MailAccountId, SearchJob>,
-    message_details: LatestJobQueue<MailAccountId, MessageDetailJob>,
+    message_details: MessageDetailScheduler,
     notification_baselines:
         Mutex<HashMap<MailAccountId, HashMap<FolderId, HashMap<ConversationId, i64>>>>,
     remote_change_accounts: Mutex<HashSet<MailAccountId>>,
@@ -48,9 +51,71 @@ struct SearchJob {
 #[derive(Clone)]
 struct MessageDetailJob {
     service: MailService,
+    generation: u64,
     request_id: u64,
     account_id: MailAccountId,
     conversation_id: ConversationId,
+}
+
+struct MessageDetailScheduler {
+    remote_jobs: LatestJobQueue<MailAccountId, MessageDetailJob>,
+    next_generation: AtomicU64,
+    current_generations: Mutex<HashMap<MailAccountId, u64>>,
+}
+
+impl MessageDetailScheduler {
+    fn new() -> Self {
+        Self {
+            remote_jobs: LatestJobQueue::new(),
+            next_generation: AtomicU64::new(1),
+            current_generations: Mutex::new(HashMap::new()),
+        }
+    }
+
+    fn select(&self, job: &mut MessageDetailJob) {
+        job.generation = self.next_generation.fetch_add(1, Ordering::Relaxed);
+        self.current_generations
+            .lock()
+            .expect("message detail scheduler lock poisoned")
+            .insert(job.account_id.clone(), job.generation);
+    }
+
+    fn is_current(&self, job: &MessageDetailJob) -> bool {
+        self.current_generations
+            .lock()
+            .expect("message detail scheduler lock poisoned")
+            .get(&job.account_id)
+            .copied()
+            == Some(job.generation)
+    }
+
+    fn complete_current(&self, job: &MessageDetailJob) -> bool {
+        let mut generations = self
+            .current_generations
+            .lock()
+            .expect("message detail scheduler lock poisoned");
+        if generations.get(&job.account_id).copied() != Some(job.generation) {
+            return false;
+        }
+        generations.remove(&job.account_id);
+        true
+    }
+
+    fn begin_remote(&self, job: MessageDetailJob) -> bool {
+        self.remote_jobs.begin(job.account_id.clone(), job)
+    }
+
+    fn finish_remote(&self, account_id: &MailAccountId) -> Option<MessageDetailJob> {
+        self.remote_jobs.finish(account_id)
+    }
+
+    fn cancel(&self, account_id: &MailAccountId) {
+        self.remote_jobs.cancel_pending(account_id);
+        self.current_generations
+            .lock()
+            .expect("message detail scheduler lock poisoned")
+            .remove(account_id);
+    }
 }
 
 #[derive(Clone)]
@@ -144,7 +209,7 @@ impl CacheManager {
                 fully_active_account: Mutex::new(None),
                 account_refreshes: Mutex::new(HashMap::new()),
                 account_searches: LatestJobQueue::new(),
-                message_details: LatestJobQueue::new(),
+                message_details: MessageDetailScheduler::new(),
                 notification_baselines: Mutex::new(HashMap::new()),
                 remote_change_accounts: Mutex::new(HashSet::new()),
                 change_monitor: Mutex::new(ChangeMonitorState::default()),
@@ -386,29 +451,66 @@ impl CacheManager {
         account_id: MailAccountId,
         conversation_id: ConversationId,
     ) {
-        let job = MessageDetailJob {
+        let mut job = MessageDetailJob {
             service: mail_service,
+            generation: 0,
             request_id,
             account_id,
             conversation_id,
         };
-        if !self.begin_message_detail(job.clone()) {
+        self.state.message_details.select(&mut job);
+        let manager = self.clone();
+        std::thread::spawn(move || {
+            let cached = futures::executor::block_on(
+                job.service
+                    .cached_message_detail(&job.account_id, &job.conversation_id),
+            );
+            manager.complete_message_detail_cache_probe(job, cached);
+        });
+    }
+
+    pub fn cancel_message_detail_requests(&self, account_id: &MailAccountId) {
+        self.state.message_details.cancel(account_id);
+    }
+
+    fn complete_message_detail_cache_probe(
+        &self,
+        job: MessageDetailJob,
+        result: anyhow::Result<Option<MessageDetail>>,
+    ) {
+        if let Ok(Some(detail)) = result {
+            if self.state.message_details.complete_current(&job) {
+                self.publish(CacheEvent::message_detail(
+                    job.request_id,
+                    job.account_id,
+                    job.conversation_id,
+                    Ok(Some(detail)),
+                ));
+            }
             return;
         }
-        self.spawn_message_detail(job);
-    }
 
-    pub fn cancel_pending_message_detail(&self, account_id: &MailAccountId) {
-        self.state.message_details.cancel_pending(account_id);
-    }
-
-    fn begin_message_detail(&self, job: MessageDetailJob) -> bool {
-        self.state
-            .message_details
-            .begin(job.account_id.clone(), job)
+        if !self.state.message_details.is_current(&job) {
+            return;
+        }
+        if self.state.message_details.begin_remote(job.clone()) {
+            if !self.state.message_details.is_current(&job) {
+                if let Some(next) = self.state.message_details.finish_remote(&job.account_id) {
+                    self.spawn_message_detail(next);
+                }
+                return;
+            }
+            self.spawn_message_detail(job);
+        }
     }
 
     fn spawn_message_detail(&self, job: MessageDetailJob) {
+        if !self.state.message_details.is_current(&job) {
+            if let Some(next) = self.state.message_details.finish_remote(&job.account_id) {
+                self.spawn_message_detail(next);
+            }
+            return;
+        }
         let manager = self.clone();
         std::thread::spawn(move || {
             let result = futures::executor::block_on(
@@ -419,20 +521,18 @@ impl CacheManager {
                 crate::logging::report_failure("message-detail-load", &error);
                 "Message unavailable.".to_string()
             });
-            manager.publish(CacheEvent::message_detail(
-                job.request_id,
-                job.account_id.clone(),
-                job.conversation_id.clone(),
-                result,
-            ));
-            if let Some(next) = manager.finish_message_detail(&job.account_id) {
+            if manager.state.message_details.complete_current(&job) {
+                manager.publish(CacheEvent::message_detail(
+                    job.request_id,
+                    job.account_id.clone(),
+                    job.conversation_id.clone(),
+                    result,
+                ));
+            }
+            if let Some(next) = manager.state.message_details.finish_remote(&job.account_id) {
                 manager.spawn_message_detail(next);
             }
         });
-    }
-
-    fn finish_message_detail(&self, account_id: &MailAccountId) -> Option<MessageDetailJob> {
-        self.state.message_details.finish(account_id)
     }
 
     pub fn request_thread_page(
@@ -1399,52 +1499,188 @@ mod tests {
     }
 
     #[test]
-    fn message_details_are_single_flight_and_keep_only_the_newest_follow_up() {
+    fn repeated_message_detail_is_single_flight_and_keeps_only_the_newest_follow_up() {
         let manager = CacheManager::new();
+        let scheduler = &manager.state.message_details;
         let backend = crate::integration::backend::stub_backend();
         let account_id = MailAccountId("account-1".into());
         let job = |request_id, conversation_id: &str| MessageDetailJob {
             service: MailService::new(backend.clone()),
+            generation: 0,
             request_id,
             account_id: account_id.clone(),
             conversation_id: ConversationId(conversation_id.into()),
         };
 
-        assert!(manager.begin_message_detail(job(1, "first")));
-        assert!(!manager.begin_message_detail(job(2, "second")));
-        assert!(!manager.begin_message_detail(job(3, "third")));
+        assert!(scheduler.begin_remote(job(1, "conversation")));
+        assert!(!scheduler.begin_remote(job(2, "conversation")));
+        assert!(!scheduler.begin_remote(job(3, "conversation")));
 
-        let follow_up = manager
-            .finish_message_detail(&account_id)
+        let follow_up = scheduler
+            .finish_remote(&account_id)
             .expect("newest detail request should be retained");
         assert_eq!(follow_up.request_id, 3);
-        assert_eq!(follow_up.conversation_id, ConversationId("third".into()));
-        assert!(manager.finish_message_detail(&account_id).is_none());
-        assert!(manager.begin_message_detail(job(4, "fourth")));
+        assert_eq!(
+            follow_up.conversation_id,
+            ConversationId("conversation".into())
+        );
+        assert!(scheduler.finish_remote(&account_id).is_none());
+        assert!(scheduler.begin_remote(job(4, "conversation")));
+    }
+
+    #[test]
+    fn cached_detail_probe_bypasses_an_existing_remote_flight() {
+        let manager = CacheManager::new();
+        let scheduler = &manager.state.message_details;
+        let backend = crate::integration::backend::stub_backend();
+        let account_id = MailAccountId("account-1".into());
+        let job = |request_id, conversation_id: &str| MessageDetailJob {
+            service: MailService::new(backend.clone()),
+            generation: 0,
+            request_id,
+            account_id: account_id.clone(),
+            conversation_id: ConversationId(conversation_id.into()),
+        };
+
+        let active = job(1, "uncached");
+        let mut cached = job(2, "stub-account");
+        let detail = futures::executor::block_on(
+            cached
+                .service
+                .cached_message_detail(&cached.account_id, &cached.conversation_id),
+        )
+        .expect("stub cache probe should succeed")
+        .expect("stub detail should be cached");
+
+        assert!(scheduler.begin_remote(active));
+        scheduler.select(&mut cached);
+        manager.complete_message_detail_cache_probe(cached, Ok(Some(detail)));
+
+        assert!(matches!(
+            manager.drain().as_slice(),
+            [CacheEvent::MessageDetailLoaded {
+                request_id: 2,
+                conversation_id,
+                result: Ok(Some(_)),
+                ..
+            }] if conversation_id == &ConversationId("stub-account".into())
+        ));
+        assert!(scheduler.finish_remote(&account_id).is_none());
+    }
+
+    #[test]
+    fn stale_cached_hit_cannot_complete_a_reused_ui_request_id() {
+        let manager = CacheManager::new();
+        let scheduler = &manager.state.message_details;
+        let backend = crate::integration::backend::stub_backend();
+        let account_id = MailAccountId("account-1".into());
+        let job = |conversation_id: &str| MessageDetailJob {
+            service: MailService::new(backend.clone()),
+            generation: 0,
+            request_id: 0,
+            account_id: account_id.clone(),
+            conversation_id: ConversationId(conversation_id.into()),
+        };
+        let mut stale = job("stub-account");
+        let detail = futures::executor::block_on(
+            stale
+                .service
+                .cached_message_detail(&stale.account_id, &stale.conversation_id),
+        )
+        .expect("stub cache probe should succeed")
+        .expect("stub detail should be cached");
+        let mut current = job("current");
+
+        scheduler.select(&mut stale);
+        scheduler.select(&mut current);
+        manager.complete_message_detail_cache_probe(stale, Ok(Some(detail)));
+
+        assert!(manager.drain().is_empty());
+        assert!(scheduler.is_current(&current));
+    }
+
+    #[test]
+    fn canceled_selection_ignores_a_late_cached_hit() {
+        let manager = CacheManager::new();
+        let scheduler = &manager.state.message_details;
+        let backend = crate::integration::backend::stub_backend();
+        let account_id = MailAccountId("account-1".into());
+        let mut job = MessageDetailJob {
+            service: MailService::new(backend),
+            generation: 0,
+            request_id: 1,
+            account_id: account_id.clone(),
+            conversation_id: ConversationId("stub-account".into()),
+        };
+        let detail = futures::executor::block_on(
+            job.service
+                .cached_message_detail(&job.account_id, &job.conversation_id),
+        )
+        .expect("stub cache probe should succeed")
+        .expect("stub detail should be cached");
+
+        scheduler.select(&mut job);
+        scheduler.cancel(&account_id);
+        manager.complete_message_detail_cache_probe(job, Ok(Some(detail)));
+
+        assert!(manager.drain().is_empty());
+        assert!(scheduler.finish_remote(&account_id).is_none());
+    }
+
+    #[test]
+    fn out_of_order_cache_misses_cannot_replace_the_newest_remote_follow_up() {
+        let manager = CacheManager::new();
+        let scheduler = &manager.state.message_details;
+        let backend = crate::integration::backend::stub_backend();
+        let account_id = MailAccountId("account-1".into());
+        let job = |request_id, conversation_id: &str| MessageDetailJob {
+            service: MailService::new(backend.clone()),
+            generation: 0,
+            request_id,
+            account_id: account_id.clone(),
+            conversation_id: ConversationId(conversation_id.into()),
+        };
+        let active = job(1, "active");
+        let mut stale = job(2, "stale");
+        let mut newest = job(3, "newest");
+
+        assert!(scheduler.begin_remote(active));
+        scheduler.select(&mut stale);
+        scheduler.select(&mut newest);
+        manager.complete_message_detail_cache_probe(stale, Ok(None));
+        manager.complete_message_detail_cache_probe(newest, Ok(None));
+
+        let follow_up = scheduler
+            .finish_remote(&account_id)
+            .expect("newest cache miss should be the only remote follow-up");
+        assert_eq!(follow_up.request_id, 3);
+        assert_eq!(follow_up.conversation_id, ConversationId("newest".into()));
     }
 
     #[test]
     fn message_detail_flights_are_scoped_per_account() {
         let manager = CacheManager::new();
+        let scheduler = &manager.state.message_details;
         let backend = crate::integration::backend::stub_backend();
         let job = |account_id: &str, request_id| MessageDetailJob {
             service: MailService::new(backend.clone()),
+            generation: 0,
             request_id,
             account_id: MailAccountId(account_id.into()),
             conversation_id: ConversationId("conversation".into()),
         };
 
-        assert!(manager.begin_message_detail(job("account-1", 1)));
-        assert!(manager.begin_message_detail(job("account-2", 2)));
-        assert!(!manager.begin_message_detail(job("account-1", 3)));
+        assert!(scheduler.begin_remote(job("account-1", 1)));
+        assert!(scheduler.begin_remote(job("account-2", 2)));
+        assert!(!scheduler.begin_remote(job("account-1", 3)));
 
-        let first_follow_up = manager
-            .finish_message_detail(&MailAccountId("account-1".into()))
+        let first_follow_up = scheduler
+            .finish_remote(&MailAccountId("account-1".into()))
             .expect("first account should retain its follow-up");
         assert_eq!(first_follow_up.request_id, 3);
         assert!(
-            manager
-                .finish_message_detail(&MailAccountId("account-2".into()))
+            scheduler
+                .finish_remote(&MailAccountId("account-2".into()))
                 .is_none()
         );
     }
@@ -1452,21 +1688,23 @@ mod tests {
     #[test]
     fn clearing_message_selection_discards_its_queued_detail() {
         let manager = CacheManager::new();
+        let scheduler = &manager.state.message_details;
         let backend = crate::integration::backend::stub_backend();
         let account_id = MailAccountId("account-1".into());
         let job = |request_id| MessageDetailJob {
             service: MailService::new(backend.clone()),
+            generation: 0,
             request_id,
             account_id: account_id.clone(),
-            conversation_id: ConversationId(format!("conversation-{request_id}")),
+            conversation_id: ConversationId("conversation".into()),
         };
 
-        assert!(manager.begin_message_detail(job(1)));
-        assert!(!manager.begin_message_detail(job(2)));
-        manager.cancel_pending_message_detail(&account_id);
+        assert!(scheduler.begin_remote(job(1)));
+        assert!(!scheduler.begin_remote(job(2)));
+        manager.cancel_message_detail_requests(&account_id);
 
-        assert!(manager.finish_message_detail(&account_id).is_none());
-        assert!(manager.begin_message_detail(job(3)));
+        assert!(scheduler.finish_remote(&account_id).is_none());
+        assert!(scheduler.begin_remote(job(3)));
     }
 
     #[test]
