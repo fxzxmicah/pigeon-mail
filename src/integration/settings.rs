@@ -1,47 +1,51 @@
-use std::path::{Path, PathBuf};
+#[cfg(debug_assertions)]
+use std::path::Path;
 
 use gio::prelude::*;
 
-use crate::model::settings::{AccountProfile, AppSettings};
+use crate::model::account::MailAccountId;
+use crate::model::settings::AppSettings;
 
 const KEY_SELECTED_ACCOUNT_ID: &str = "selected-account-id";
 const KEY_PREFER_HTML_VIEW: &str = "prefer-html-view";
 
 #[derive(Clone)]
-pub struct SettingsStore {
-    metadata_path: PathBuf,
-}
+pub struct SettingsStore;
 
 impl SettingsStore {
     pub fn new() -> Self {
-        Self {
-            metadata_path: crate::config::config_file("accounts.json"),
-        }
+        Self
     }
 
-    pub fn load(&self) -> anyhow::Result<AppSettings> {
+    pub fn load(&self) -> AppSettings {
         let gsettings = application_settings();
         let selected_account_id = match gsettings.string(KEY_SELECTED_ACCOUNT_ID).as_str() {
             "" => None,
-            value => Some(value.to_string()),
+            value => Some(MailAccountId(value.to_string())),
         };
-
-        Ok(AppSettings {
+        AppSettings {
             selected_account_id,
             prefer_html_view: gsettings.boolean(KEY_PREFER_HTML_VIEW),
-            account_profiles: crate::integration::json::load_vec(&self.metadata_path)?,
-        })
+        }
     }
 
-    pub fn save(&self, settings: &AppSettings) -> anyhow::Result<()> {
-        ensure_account_profiles_readable(&self.metadata_path)?;
-        save_account_profiles(&self.metadata_path, &settings.account_profiles)?;
+    pub fn save_preferences(
+        &self,
+        settings: &AppSettings,
+    ) -> anyhow::Result<()> {
         let gsettings = application_settings();
-        gsettings.set_string(
+        let selected_account = gsettings.set_string(
             KEY_SELECTED_ACCOUNT_ID,
-            settings.selected_account_id.as_deref().unwrap_or(""),
-        )?;
-        gsettings.set_boolean(KEY_PREFER_HTML_VIEW, settings.prefer_html_view)?;
+            settings
+                .selected_account_id
+                .as_ref()
+                .map(|account_id| account_id.0.as_str())
+                .unwrap_or(""),
+        );
+        let body_view = gsettings.set_boolean(KEY_PREFER_HTML_VIEW, settings.prefer_html_view);
+
+        selected_account?;
+        body_view?;
         Ok(())
     }
 }
@@ -72,12 +76,4 @@ fn development_settings() -> gio::Settings {
         .expect("the development GSettings schema must contain the application ID");
 
     gio::Settings::new_full(&schema, None::<&gio::SettingsBackend>, None)
-}
-
-fn save_account_profiles(path: &Path, profiles: &[AccountProfile]) -> anyhow::Result<()> {
-    crate::integration::json::save_slice(path, profiles)
-}
-
-fn ensure_account_profiles_readable(path: &Path) -> anyhow::Result<()> {
-    crate::integration::json::load_vec::<AccountProfile>(path).map(|_| ())
 }

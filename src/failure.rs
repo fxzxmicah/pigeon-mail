@@ -21,7 +21,7 @@ pub fn classify_failure(error: &anyhow::Error) -> RefreshFailureKind {
                 gio::IOErrorEnum::NoSpace
                 | gio::IOErrorEnum::ReadOnly
                 | gio::IOErrorEnum::TooManyOpenFiles => RefreshFailureKind::Storage,
-                _ => RefreshFailureKind::Backend,
+                _ => continue,
             };
         }
         if let Some(kind) = error.kind::<gio::DBusError>() {
@@ -34,7 +34,7 @@ pub fn classify_failure(error: &anyhow::Error) -> RefreshFailureKind {
                 | gio::DBusError::NoNetwork
                 | gio::DBusError::Disconnected
                 | gio::DBusError::TimedOut => RefreshFailureKind::Connectivity,
-                _ => RefreshFailureKind::Backend,
+                _ => continue,
             };
         }
     }
@@ -42,7 +42,7 @@ pub fn classify_failure(error: &anyhow::Error) -> RefreshFailureKind {
 }
 
 pub(crate) fn classify_failure_message(error: &impl std::fmt::Display) -> RefreshFailureKind {
-    let message = error.to_string().to_ascii_lowercase();
+    let message = format!("{error:#}").to_ascii_lowercase();
     if message.contains("unauthorized")
         || contains_any(
             &message,
@@ -143,5 +143,15 @@ mod tests {
             classify_failure(&authentication),
             RefreshFailureKind::Authentication
         );
+    }
+
+    #[test]
+    fn generic_glib_failure_does_not_hide_provider_failure_evidence() {
+        let failure = anyhow::Error::new(glib::Error::new(
+            gio::IOErrorEnum::Failed,
+            "TLS handshake failed",
+        ))
+        .context("folder operation failed");
+        assert_eq!(classify_failure(&failure), RefreshFailureKind::Connectivity);
     }
 }

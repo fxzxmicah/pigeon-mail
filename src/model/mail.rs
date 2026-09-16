@@ -1,46 +1,133 @@
-use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 
 use crate::model::account::MailAccountId;
 
-#[cfg(debug_assertions)]
-pub(crate) const CONVERSATION_PAGE_SIZE: usize = 7;
+pub(crate) const SIGNATURE_REGION_ATTRIBUTE: &str = "data-signature-region";
 
-#[cfg(not(debug_assertions))]
 pub(crate) const CONVERSATION_PAGE_SIZE: usize = 50;
+
+pub(crate) fn escape_html_text(text: &str) -> String {
+    let mut escaped = String::with_capacity(text.len());
+    for character in text.chars() {
+        match character {
+            '&' => escaped.push_str("&amp;"),
+            '<' => escaped.push_str("&lt;"),
+            '>' => escaped.push_str("&gt;"),
+            '\'' => escaped.push_str("&apos;"),
+            '"' => escaped.push_str("&quot;"),
+            _ => escaped.push(character),
+        }
+    }
+    escaped
+}
 
 pub(crate) fn plain_text_to_html(text: &str) -> String {
     let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
-    glib::markup_escape_text(&normalized)
-        .to_string()
-        .replace('\n', "<br>")
+    escape_html_text(&normalized).replace('\n', "<br>")
+}
+
+pub(crate) fn sort_conversations(conversations: &mut [ConversationSummary]) {
+    conversations.sort_by(|left, right| {
+        right
+            .last_updated_unix_ms
+            .cmp(&left.last_updated_unix_ms)
+            .then_with(|| left.subject.cmp(&right.subject))
+    });
+}
+
+pub(crate) fn sort_and_deduplicate_conversations(
+    conversations: &mut Vec<ConversationSummary>,
+) {
+    let mut seen = HashSet::new();
+    conversations.retain(|summary| seen.insert(summary.id.clone()));
+    sort_conversations(conversations);
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MailboxMode {
     Loading,
     Live,
-    StubNoAccount,
-    StubUnavailable,
+    NoAccount,
+    Unavailable,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WriteOutcome {
+    Unchanged,
+    Applied,
+    Queued,
+}
+
+impl WriteOutcome {
+    pub fn changed(self) -> bool {
+        self != Self::Unchanged
+    }
+
+    pub fn requires_convergence(self) -> bool {
+        self == Self::Queued
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MessageAction {
+    SetStarred(bool),
+    SetRead(bool),
+    MoveTo(FolderId),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AttachmentOperation {
+    Open,
+    SaveAs,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct FolderId(pub String);
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ConversationId(pub String);
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct MessageId(pub String);
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct AttachmentInfo {
     pub display_name: String,
-    pub uri: String,
+    pub location: AttachmentLocation,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AttachmentLocation {
+    CachedToken(String),
+    ExternalUri(String),
+}
+
+impl AttachmentLocation {
+    pub fn cached_token(&self) -> Option<&str> {
+        match self {
+            Self::CachedToken(token) => Some(token),
+            Self::ExternalUri(_) => None,
+        }
+    }
+
+    pub fn external_uri(&self) -> Option<&str> {
+        match self {
+            Self::CachedToken(_) => None,
+            Self::ExternalUri(uri) => Some(uri),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AttachmentSource {
+    pub account_id: MailAccountId,
+    pub conversation_id: ConversationId,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConversationSummary {
     pub id: ConversationId,
+    pub folder_id: FolderId,
     pub subject: String,
     pub participants: Vec<String>,
     pub message_count: u32,
@@ -51,7 +138,7 @@ pub struct ConversationSummary {
     pub preview: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct MailFolder {
     pub id: FolderId,
     pub name: String,
@@ -59,7 +146,7 @@ pub struct MailFolder {
     pub kind: FolderKind,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FolderKind {
     Inbox,
     Drafts,
@@ -71,7 +158,7 @@ pub enum FolderKind {
     Custom,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct MessageDetail {
     pub message_id: MessageId,
     pub conversation_id: ConversationId,
@@ -88,7 +175,7 @@ pub struct MessageDetail {
     pub body: MessageBody,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub enum MessageBody {
     Empty,
     Html {
@@ -159,7 +246,7 @@ impl MessageBody {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct DraftMessage {
     pub conversation_id: Option<ConversationId>,
     pub message_id: Option<MessageId>,
@@ -171,23 +258,102 @@ pub struct DraftMessage {
     pub bcc: Vec<String>,
     pub subject: String,
     pub attachments: Vec<AttachmentInfo>,
-    pub html_body: String,
-    pub text_body: String,
+    attachment_source: Option<AttachmentSource>,
+    pub body: DraftBody,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct PreparedMessage {
+    pub(crate) conversation_id: Option<ConversationId>,
+    pub(crate) message_id: Option<MessageId>,
+    pub(crate) from: String,
+    pub(crate) reply_to: Option<String>,
+    pub(crate) to: Vec<String>,
+    pub(crate) cc: Vec<String>,
+    pub(crate) bcc: Vec<String>,
+    pub(crate) subject: String,
+    pub(crate) attachment_uris: Vec<String>,
+    pub(crate) body: DraftBody,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct DraftBody {
+    html: String,
+    text: String,
+    text_signature: Option<TextRange>,
+}
+
+impl DraftBody {
+    pub fn html(&self) -> &str {
+        &self.html
+    }
+
+    pub fn text(&self) -> &str {
+        &self.text
+    }
+
+    pub fn text_signature(&self) -> Option<TextRange> {
+        self.text_signature
+    }
+
+    pub fn set_html(&mut self, html: String) {
+        self.html = html;
+    }
+
+    pub fn set_text(&mut self, text: String, text_signature: Option<TextRange>) {
+        self.text_signature = text_signature.filter(|range| range.is_valid_for(&text));
+        self.text = text;
+    }
+
+    pub fn replace(&mut self, html: String, text: String, text_signature: Option<TextRange>) {
+        self.set_html(html);
+        self.set_text(text, text_signature);
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TextRange {
+    pub start: usize,
+    pub end: usize,
+}
+
+impl TextRange {
+    pub fn for_segment(prefix: &str, segment: &str) -> Self {
+        let start = prefix.chars().count();
+        Self {
+            start,
+            end: start + segment.chars().count(),
+        }
+    }
+
+    pub fn split<'a>(self, text: &'a str) -> Option<(&'a str, &'a str, &'a str)> {
+        if self.start > self.end {
+            return None;
+        }
+        let start = byte_index(text, self.start)?;
+        let end = byte_index(text, self.end)?;
+        Some((&text[..start], &text[start..end], &text[end..]))
+    }
+
+    pub fn is_valid_for(self, text: &str) -> bool {
+        self.split(text).is_some()
+    }
+}
+
+fn byte_index(text: &str, character_offset: usize) -> Option<usize> {
+    if character_offset == text.chars().count() {
+        Some(text.len())
+    } else {
+        text.char_indices()
+            .nth(character_offset)
+            .map(|(index, _)| index)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StoredMessageRef {
     pub conversation_id: ConversationId,
     pub message_id: MessageId,
-}
-
-impl From<&MessageDetail> for StoredMessageRef {
-    fn from(detail: &MessageDetail) -> Self {
-        Self {
-            conversation_id: detail.conversation_id.clone(),
-            message_id: detail.message_id.clone(),
-        }
-    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -222,15 +388,152 @@ impl DraftMessage {
             bcc: Vec::new(),
             subject: String::new(),
             attachments: Vec::new(),
-            html_body: String::new(),
-            text_body: String::new(),
+            attachment_source: None,
+            body: DraftBody::default(),
         }
+    }
+
+    pub(crate) fn has_cached_attachments(&self) -> bool {
+        self.attachments
+            .iter()
+            .any(|attachment| attachment.location.cached_token().is_some())
+    }
+
+    pub(crate) fn attachment_source(&self) -> Option<&AttachmentSource> {
+        self.attachment_source.as_ref()
+    }
+
+    pub(crate) fn set_attachment_source(&mut self, source: Option<AttachmentSource>) {
+        self.attachment_source = if self.has_cached_attachments() {
+            source
+        } else {
+            None
+        };
+    }
+
+    pub(crate) fn into_prepared(self) -> Result<PreparedMessage, &'static str> {
+        let attachment_uris = self
+            .attachments
+            .into_iter()
+            .map(|attachment| match attachment.location {
+                AttachmentLocation::ExternalUri(uri) => Ok(uri),
+                AttachmentLocation::CachedToken(_) => {
+                    Err("draft contains an unresolved cached attachment")
+                }
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(PreparedMessage {
+            conversation_id: self.conversation_id,
+            message_id: self.message_id,
+            from: self.from,
+            reply_to: self.reply_to,
+            to: self.to,
+            cc: self.cc,
+            bcc: self.bcc,
+            subject: self.subject,
+            attachment_uris,
+            body: self.body,
+        })
+    }
+}
+
+impl PreparedMessage {
+    pub(crate) fn has_recipient(&self) -> bool {
+        [&self.to, &self.cc, &self.bcc]
+            .into_iter()
+            .flatten()
+            .any(|recipient| !recipient.trim().is_empty())
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{MailtoRequest, MessageBody, plain_text_to_html};
+    use super::{
+        AttachmentInfo, AttachmentLocation, ConversationId, ConversationSummary, DraftBody,
+        DraftMessage, FolderId, MailtoRequest, MessageBody, TextRange, WriteOutcome,
+        escape_html_text, plain_text_to_html, sort_and_deduplicate_conversations,
+    };
+    use crate::model::account::MailAccountId;
+
+    fn summary(subject: &str, updated: i64) -> ConversationSummary {
+        ConversationSummary {
+            id: ConversationId("same-message".into()),
+            folder_id: FolderId("inbox".into()),
+            subject: subject.into(),
+            participants: Vec::new(),
+            message_count: 1,
+            unread_count: 0,
+            attachment_count: 0,
+            starred: false,
+            last_updated_unix_ms: updated,
+            preview: String::new(),
+        }
+    }
+
+    #[test]
+    fn conversation_deduplication_preserves_source_precedence_before_sorting() {
+        let mut conversations = vec![summary("authoritative", 1), summary("stale", 2)];
+
+        sort_and_deduplicate_conversations(&mut conversations);
+
+        assert_eq!(conversations.len(), 1);
+        assert_eq!(conversations[0].subject, "authoritative");
+    }
+
+    #[test]
+    fn write_outcomes_separate_visible_change_from_network_convergence() {
+        assert!(!WriteOutcome::Unchanged.changed());
+        assert!(!WriteOutcome::Unchanged.requires_convergence());
+        assert!(WriteOutcome::Applied.changed());
+        assert!(!WriteOutcome::Applied.requires_convergence());
+        assert!(WriteOutcome::Queued.changed());
+        assert!(WriteOutcome::Queued.requires_convergence());
+    }
+
+    #[test]
+    fn prepared_messages_accept_only_materialized_attachments() {
+        let mut ready = DraftMessage::empty(
+            MailAccountId("account".into()),
+            "sender@example.com".into(),
+        );
+        ready.attachments.push(AttachmentInfo {
+            display_name: "document.pdf".into(),
+            location: AttachmentLocation::ExternalUri("file:///document.pdf".into()),
+        });
+        let prepared = ready.into_prepared().unwrap();
+        assert_eq!(
+            prepared.attachment_uris,
+            vec!["file:///document.pdf".to_string()]
+        );
+
+        let mut unresolved = DraftMessage::empty(
+            MailAccountId("account".into()),
+            "sender@example.com".into(),
+        );
+        unresolved.attachments.push(AttachmentInfo {
+            display_name: "cached.pdf".into(),
+            location: AttachmentLocation::CachedToken("part-1".into()),
+        });
+        assert!(unresolved.into_prepared().is_err());
+    }
+
+    #[test]
+    fn text_ranges_use_character_offsets_and_reject_invalid_boundaries() {
+        let range = TextRange::for_segment("前缀", "签名");
+        assert_eq!(range, TextRange { start: 2, end: 4 });
+        assert_eq!(range.split("前缀签名尾部"), Some(("前缀", "签名", "尾部")));
+        assert!(!TextRange { start: 4, end: 3 }.is_valid_for("text"));
+        assert!(!TextRange { start: 0, end: 5 }.is_valid_for("text"));
+    }
+
+    #[test]
+    fn draft_body_never_retains_a_range_outside_its_text() {
+        let mut body = DraftBody::default();
+        body.set_text("short".into(), Some(TextRange { start: 0, end: 9 }));
+
+        assert_eq!(body.text(), "short");
+        assert!(body.text_signature().is_none());
+    }
 
     #[test]
     fn mailto_is_empty_only_when_every_field_is_empty() {
@@ -273,6 +576,14 @@ mod tests {
             "One<br>Two<br>Three"
         );
         assert_eq!(plain_text_to_html("Unicode: 鸽子"), "Unicode: 鸽子");
+    }
+
+    #[test]
+    fn html_text_escaping_covers_markup_and_attribute_delimiters() {
+        assert_eq!(
+            escape_html_text("<&>'\""),
+            "&lt;&amp;&gt;&apos;&quot;"
+        );
     }
 
     #[test]

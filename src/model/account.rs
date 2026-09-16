@@ -1,63 +1,223 @@
-use glib;
-use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 
-use crate::model::mail::plain_text_to_html;
+use crate::model::address::normalized_mailbox_address;
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct MailAccountId(pub String);
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct AliasId(pub String);
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MailAccount {
     pub id: MailAccountId,
     pub display_name: String,
-    pub aliases: Vec<SendingIdentity>,
+    aliases: Vec<SendingIdentity>,
+    primary_address: String,
+    default_address: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SendingIdentity {
-    pub id: AliasId,
     pub address: String,
     pub display_name: String,
     pub reply_to: Option<String>,
-    pub signature_html: String,
-    pub signature_text: String,
-    pub is_default: bool,
-    pub is_primary_address: bool,
+    pub signature: Signature,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Signature {
+    pub html: String,
+    pub text: String,
 }
 
 impl MailAccount {
-    pub fn selector_label(&self) -> String {
-        self.display_name.clone()
+    pub fn new(id: MailAccountId, display_name: String, primary: SendingIdentity) -> Self {
+        let primary = primary.normalized();
+        assert!(
+            !normalized_mailbox_address(&primary.address).is_empty(),
+            "a primary identity requires a mail address"
+        );
+        let display_name = display_name.trim();
+        assert!(!display_name.is_empty(), "a mail account requires a display name");
+        let primary_address = primary.address.clone();
+        Self {
+            id,
+            display_name: display_name.to_string(),
+            aliases: vec![primary],
+            default_address: primary_address.clone(),
+            primary_address,
+        }
     }
 
-    pub fn default_identity(&self) -> Option<&SendingIdentity> {
+    pub fn aliases(&self) -> &[SendingIdentity] {
+        &self.aliases
+    }
+
+    pub fn default_identity(&self) -> &SendingIdentity {
+        self.identity(&self.default_address)
+            .expect("the default identity belongs to its mail account")
+    }
+
+    pub fn primary_identity(&self) -> &SendingIdentity {
+        self.identity(&self.primary_address)
+            .expect("the primary identity belongs to its mail account")
+    }
+
+    pub fn identity(&self, address: &str) -> Option<&SendingIdentity> {
+        let address = normalized_mailbox_address(address);
         self.aliases
             .iter()
-            .find(|identity| identity.is_default)
-            .or_else(|| self.aliases.first())
+            .find(|identity| normalized_mailbox_address(&identity.address) == address)
     }
 
-    pub fn primary_identity(&self) -> Option<&SendingIdentity> {
-        self.aliases
+    pub fn is_default_identity(&self, address: &str) -> bool {
+        normalized_mailbox_address(&self.default_address)
+            == normalized_mailbox_address(address)
+    }
+
+    pub fn is_primary_identity(&self, address: &str) -> bool {
+        normalized_mailbox_address(&self.primary_address)
+            == normalized_mailbox_address(address)
+    }
+
+    pub(crate) fn replace_aliases(
+        &mut self,
+        aliases: Vec<SendingIdentity>,
+        default_address: String,
+    ) {
+        let aliases = aliases
+            .into_iter()
+            .map(SendingIdentity::normalized)
+            .collect::<Vec<_>>();
+        let mut addresses = HashSet::new();
+        assert!(aliases.iter().all(|identity| {
+            let address = normalized_mailbox_address(&identity.address);
+            !address.is_empty() && addresses.insert(address)
+        }));
+        let primary_address = normalized_mailbox_address(&self.primary_address);
+        assert!(aliases.iter().any(|identity| {
+            normalized_mailbox_address(&identity.address) == primary_address
+        }));
+        let default_address = normalized_mailbox_address(&default_address);
+        let default_address = aliases
             .iter()
-            .find(|identity| identity.is_primary_address)
+            .find(|identity| normalized_mailbox_address(&identity.address) == default_address)
+            .expect("the default identity belongs to its mail account")
+            .address
+            .clone();
+        self.aliases = aliases;
+        self.default_address = default_address;
     }
 
-    pub fn primary_identity_mut(&mut self) -> Option<&mut SendingIdentity> {
-        self.aliases
-            .iter_mut()
-            .find(|identity| identity.is_primary_address)
+    pub(crate) fn rename(&mut self, display_name: String) -> bool {
+        let display_name = display_name.trim();
+        if display_name.is_empty() {
+            return false;
+        }
+        self.display_name = display_name.to_string();
+        true
     }
 
-    pub fn primary_or_first_identity(&self) -> Option<&SendingIdentity> {
-        self.primary_identity().or_else(|| self.aliases.first())
+    pub(crate) fn add_identity(&mut self, identity: SendingIdentity) -> bool {
+        let identity = identity.normalized();
+        let address = normalized_mailbox_address(&identity.address);
+        if address.is_empty() || self.identity(&address).is_some() {
+            return false;
+        }
+        self.aliases.push(identity);
+        true
+    }
+
+    pub(crate) fn update_identity(
+        &mut self,
+        original_address: &str,
+        display_name: String,
+        address: String,
+        reply_to: Option<String>,
+        signature: Signature,
+    ) -> bool {
+        let Some(index) = self.aliases.iter().position(|identity| {
+            normalized_mailbox_address(&identity.address)
+                == normalized_mailbox_address(original_address)
+        }) else {
+            return false;
+        };
+        let is_primary = self.is_primary_identity(original_address);
+        let address = if is_primary {
+            self.aliases[index].address.clone()
+        } else {
+            address.trim().to_string()
+        };
+        let normalized = normalized_mailbox_address(&address);
+        if normalized.is_empty()
+            || self.aliases.iter().enumerate().any(|(other_index, identity)| {
+                other_index != index
+                    && normalized_mailbox_address(&identity.address) == normalized
+            })
+        {
+            return false;
+        }
+
+        let old_address = self.aliases[index].address.clone();
+        self.aliases[index] =
+            SendingIdentity::new(address.clone(), display_name, reply_to, signature);
+        if self.is_default_identity(&old_address) {
+            self.default_address = address;
+        }
+        true
+    }
+
+    pub(crate) fn remove_identity(&mut self, address: &str) -> bool {
+        let Some(index) = self.aliases.iter().position(|identity| {
+            normalized_mailbox_address(&identity.address)
+                == normalized_mailbox_address(address)
+        }) else {
+            return false;
+        };
+        if self.is_primary_identity(address) || self.is_default_identity(address) {
+            return false;
+        }
+        self.aliases.remove(index);
+        true
+    }
+
+    pub(crate) fn set_default_identity(&mut self, address: &str) -> bool {
+        let Some(address) = self.identity(address).map(|identity| identity.address.clone()) else {
+            return false;
+        };
+        self.default_address = address;
+        true
     }
 }
 
+fn trimmed_optional(value: Option<String>) -> Option<String> {
+    value.and_then(|value| {
+        let value = value.trim();
+        (!value.is_empty()).then(|| value.to_string())
+    })
+}
+
 impl SendingIdentity {
+    pub fn new(
+        address: String,
+        display_name: String,
+        reply_to: Option<String>,
+        signature: Signature,
+    ) -> Self {
+        Self {
+            address,
+            display_name,
+            reply_to,
+            signature,
+        }
+        .normalized()
+    }
+
+    fn normalized(mut self) -> Self {
+        self.address = self.address.trim().to_string();
+        self.display_name = self.display_name.trim().to_string();
+        self.reply_to = trimmed_optional(self.reply_to);
+        self
+    }
+
     pub fn mailbox(&self) -> String {
         let display_name = self.display_name.trim();
         if display_name.is_empty() {
@@ -65,51 +225,6 @@ impl SendingIdentity {
         }
         let quoted_name = display_name.replace('\\', "\\\\").replace('"', "\\\"");
         format!("\"{quoted_name}\" <{}>", self.address.trim())
-    }
-
-    pub fn new(
-        account_id: &str,
-        address: String,
-        display_name: String,
-        reply_to: Option<String>,
-        signature_html: String,
-        signature_text: String,
-        is_default: bool,
-    ) -> Self {
-        let signature_html = normalized_signature_html(signature_html, &signature_text);
-        Self {
-            id: AliasId(format!("{account_id}:alias:{}", glib::uuid_string_random())),
-            address,
-            display_name,
-            reply_to,
-            signature_html,
-            signature_text,
-            is_default,
-            is_primary_address: false,
-        }
-    }
-
-    pub fn with_id(
-        id: AliasId,
-        address: String,
-        display_name: String,
-        reply_to: Option<String>,
-        signature_html: String,
-        signature_text: String,
-        is_default: bool,
-        is_primary_address: bool,
-    ) -> Self {
-        let signature_html = normalized_signature_html(signature_html, &signature_text);
-        Self {
-            id,
-            address,
-            display_name,
-            reply_to,
-            signature_html,
-            signature_text,
-            is_default,
-            is_primary_address,
-        }
     }
 
     pub fn display_name_or_address(&self) -> String {
@@ -121,95 +236,78 @@ impl SendingIdentity {
     }
 }
 
-fn normalized_signature_html(signature_html: String, signature_text: &str) -> String {
-    if signature_html.trim().is_empty() && !signature_text.is_empty() {
-        plain_text_to_html(signature_text)
-    } else {
-        signature_html
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{AliasId, SendingIdentity};
+    use super::{MailAccount, MailAccountId, SendingIdentity, Signature};
 
-    fn identity(display_name: &str) -> SendingIdentity {
-        SendingIdentity::with_id(
-            AliasId("alias-1".into()),
-            "a@example.com".into(),
-            display_name.into(),
+    fn identity(address: &str, name: &str) -> SendingIdentity {
+        SendingIdentity::new(
+            address.into(),
+            name.into(),
             None,
-            String::new(),
-            String::new(),
-            true,
-            false,
+            Signature::default(),
+        )
+    }
+
+    fn account() -> MailAccount {
+        MailAccount::new(
+            MailAccountId("account-1".into()),
+            "Account".into(),
+            identity("primary@example.com", "Primary"),
         )
     }
 
     #[test]
     fn mailbox_quotes_provider_display_names_safely() {
         assert_eq!(
-            identity("Doe, Jane").mailbox(),
+            identity("a@example.com", "Doe, Jane").mailbox(),
             "\"Doe, Jane\" <a@example.com>"
         );
         assert_eq!(
-            identity("A \"B\"").mailbox(),
+            identity("a@example.com", "A \"B\"").mailbox(),
             "\"A \\\"B\\\"\" <a@example.com>"
         );
-        assert_eq!(identity("").mailbox(), "a@example.com");
     }
 
     #[test]
-    fn identity_construction_preserves_rich_signatures_and_normalizes_plain_ones() {
-        let rich = SendingIdentity::with_id(
-            AliasId("rich".into()),
-            "rich@example.test".into(),
-            "Rich".into(),
-            None,
-            "<strong>Rich</strong>".into(),
-            "Plain".into(),
-            false,
-            false,
-        );
-        assert_eq!(rich.signature_html, "<strong>Rich</strong>");
-
-        let plain = SendingIdentity::with_id(
-            AliasId("plain".into()),
-            "plain@example.test".into(),
-            "Plain".into(),
-            None,
-            String::new(),
-            "A < B\nSecond line".into(),
-            false,
-            false,
-        );
-        assert_eq!(plain.signature_html, "A &lt; B<br>Second line");
+    fn account_uses_address_as_its_only_identity_key() {
+        let mut account = account();
+        assert!(account.add_identity(identity("alias@example.com", "Alias")));
+        assert!(!account.add_identity(identity("ALIAS@example.com", "Duplicate")));
+        assert!(account.set_default_identity("ALIAS@example.com"));
+        assert_eq!(account.default_identity().display_name, "Alias");
+        assert!(!account.remove_identity("alias@example.com"));
+        assert!(account.set_default_identity("primary@example.com"));
+        assert!(account.remove_identity("alias@example.com"));
     }
 
     #[test]
-    fn identity_role_is_explicit_and_independent_of_its_stable_id() {
-        let primary = SendingIdentity::with_id(
-            AliasId("stable-random-id".into()),
-            "primary@example.test".into(),
-            "Primary".into(),
-            None,
-            String::new(),
-            String::new(),
-            true,
-            true,
-        );
-        let alias = SendingIdentity::with_id(
-            AliasId("looks-like:primary".into()),
-            "alias@example.test".into(),
-            "Alias".into(),
-            None,
-            String::new(),
-            String::new(),
-            false,
-            false,
+    fn full_model_update_replaces_an_alias_address_without_a_second_key() {
+        let mut account = account();
+        assert!(account.add_identity(identity("old@example.com", "Alias")));
+        assert!(account.set_default_identity("old@example.com"));
+        assert!(account.update_identity(
+            "old@example.com",
+            "Renamed".into(),
+            "new@example.com".into(),
+            Some("reply@example.com".into()),
+            Signature::default(),
+        ));
+        assert!(account.identity("old@example.com").is_none());
+        assert_eq!(account.default_identity().address, "new@example.com");
+    }
+
+    #[test]
+    fn identity_construction_establishes_shared_text_invariants() {
+        let identity = SendingIdentity::new(
+            "  alias@example.com  ".into(),
+            "  Alias  ".into(),
+            Some("   ".into()),
+            Signature::default(),
         );
 
-        assert!(primary.is_primary_address);
-        assert!(!alias.is_primary_address);
+        assert_eq!(identity.address, "alias@example.com");
+        assert_eq!(identity.display_name, "Alias");
+        assert_eq!(identity.reply_to, None);
     }
 }

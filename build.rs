@@ -4,6 +4,7 @@ use std::process::Command;
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=native/eds.c");
+    println!("cargo:rerun-if-changed=native/source-identity.c");
     println!("cargo:rerun-if-changed=data/org.gnome.pigeon.gschema.xml");
 
     compile_development_schemas();
@@ -18,7 +19,7 @@ fn main() {
         .expect("libedataserver-1.2 development files are required");
 
     let mut build = cc::Build::new();
-    build.file("native/eds.c");
+    build.files(["native/eds.c", "native/source-identity.c"]);
 
     for include in camel.include_paths.iter().chain(eds.include_paths.iter()) {
         build.include(include);

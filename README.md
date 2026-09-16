@@ -15,7 +15,7 @@ Server and Camel, so reading and common message actions remain cache-first.
 - Reply, reply-all, forward, aliases, Reply-To addresses, and signatures
 - Attachment opening, asynchronous saving, and sending
 - Manual draft saving and a durable local outbox for deferred delivery
-- Desktop notifications for new unread mail in every folder of the active account
+- Desktop notifications for new unread mail in every folder of the current account
 - `mailto:` integration and a reusable full-window composer
 - A non-persistent stub mailbox when no eligible account is available
 
@@ -26,14 +26,17 @@ setup wizard. Add an account in GNOME Settings under **Online Accounts** and
 enable its mail service. Pigeon Mail lists accounts for which Evolution Data
 Server exposes a complete GOA-linked mail account, identity, and transport.
 
-The selected account is fully active. Accounts selected earlier in the same
-application session retain their local state long enough to finish already
-queued work, but inactive accounts are not synchronized speculatively. Message
-bodies and attachments are fetched when opened.
+Only the selected account receives automatic foreground work. If it is changed
+while a write is still running, the previous account drains that write's complete
+synchronization chain, including required replay and confirmation, and then
+retains its materialized backend and local cache while quiescent.
+Unmaterialized accounts are not synchronized speculatively. Message bodies
+and attachments are fetched when opened.
 
 Local actions are committed to the EDS/Camel cache first. Network-dependent work
-is then synchronized in the background, and durable queued operations remain
-available for a later online session.
+is then synchronized in the background. Unresolved operation intents are kept
+for the current run and their count is shown in the window; closing with pending
+work warns that those tasks will be lost.
 
 ## Requirements
 
@@ -99,9 +102,8 @@ available through GOA and EDS. It has no unified inbox, account-creation UI, or
 automatic draft saving. Provider-specific behavior and uncommon MIME structures
 remain ongoing interoperability work.
 
-Mail cache ownership remains with EDS/Camel. Pigeon-specific settings are stored
-under the `pigeon` directory in the user's XDG configuration directory; durable
-operation metadata is stored under the corresponding XDG data directory.
+Mail cache ownership remains with EDS/Camel. Lightweight preferences use
+GSettings, identity extensions and signatures remain on their EDS sources.
 
 ## Contributing
 

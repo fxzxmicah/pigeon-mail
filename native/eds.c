@@ -25,8 +25,7 @@ typedef struct {
 } AttachmentExport;
 
 typedef void (*FolderChangedFunc) (gpointer user_data);
-typedef void (*RegistryChangedFunc) (const gchar *account_id,
-					   gpointer user_data);
+typedef void (*RegistryChangedFunc) (gpointer user_data);
 
 typedef struct {
 	FolderChangedFunc callback;
@@ -40,41 +39,12 @@ typedef struct {
 	gulong source_added_id;
 	gulong source_changed_id;
 	gulong source_removed_id;
+	gulong source_enabled_id;
+	gulong source_disabled_id;
 	RegistryChangedFunc callback;
 	gpointer user_data;
 	GDestroyNotify destroy;
 } RegistryWatch;
-
-static gchar *
-mail_bridge_source_dup_goa_account_id (ESourceRegistry *registry,
-				  ESource *source)
-{
-	ESource *current = g_object_ref (source);
-	guint depth = 0;
-
-	while (current && depth++ < 32) {
-		const gchar *parent_uid;
-		ESource *parent;
-
-		if (e_source_has_extension (current, E_SOURCE_EXTENSION_GOA)) {
-			ESourceGoa *goa;
-			gchar *account_id;
-
-			goa = e_source_get_extension (current, E_SOURCE_EXTENSION_GOA);
-			account_id = e_source_goa_dup_account_id (goa);
-			g_object_unref (current);
-			return account_id;
-		}
-		parent_uid = e_source_get_parent (current);
-		parent = parent_uid && *parent_uid
-			? e_source_registry_ref_source (registry, parent_uid)
-			: NULL;
-		g_object_unref (current);
-		current = parent;
-	}
-	g_clear_object (&current);
-	return NULL;
-}
 
 static gboolean
 mail_bridge_source_affects_mail (ESource *source)
@@ -83,6 +53,7 @@ mail_bridge_source_affects_mail (ESource *source)
 		e_source_has_extension (source, E_SOURCE_EXTENSION_COLLECTION) ||
 		e_source_has_extension (source, E_SOURCE_EXTENSION_MAIL_ACCOUNT) ||
 		e_source_has_extension (source, E_SOURCE_EXTENSION_MAIL_IDENTITY) ||
+		e_source_has_extension (source, E_SOURCE_EXTENSION_MAIL_SIGNATURE) ||
 		e_source_has_extension (source, E_SOURCE_EXTENSION_MAIL_COMPOSITION) ||
 		e_source_has_extension (source, E_SOURCE_EXTENSION_MAIL_SUBMISSION) ||
 		e_source_has_extension (source, E_SOURCE_EXTENSION_MAIL_TRANSPORT);
@@ -94,14 +65,11 @@ mail_bridge_registry_source_changed_cb (ESourceRegistry *registry,
 				   gpointer user_data)
 {
 	RegistryWatch *watch = user_data;
-	gchar *account_id;
 
+	(void) registry;
 	if (!mail_bridge_source_affects_mail (source))
 		return;
-	account_id = mail_bridge_source_dup_goa_account_id (registry, source);
-	if (account_id && *account_id)
-		watch->callback (account_id, watch->user_data);
-	g_free (account_id);
+	watch->callback (watch->user_data);
 }
 
 RegistryWatch *
@@ -136,6 +104,12 @@ mail_bridge_eds_registry_watch_new (RegistryChangedFunc callback,
 	watch->source_removed_id = g_signal_connect (
 		watch->registry, "source-removed",
 		G_CALLBACK (mail_bridge_registry_source_changed_cb), watch);
+	watch->source_enabled_id = g_signal_connect (
+		watch->registry, "source-enabled",
+		G_CALLBACK (mail_bridge_registry_source_changed_cb), watch);
+	watch->source_disabled_id = g_signal_connect (
+		watch->registry, "source-disabled",
+		G_CALLBACK (mail_bridge_registry_source_changed_cb), watch);
 
 	return watch;
 }
@@ -158,6 +132,10 @@ mail_bridge_eds_registry_watch_free (RegistryWatch *watch)
 		g_signal_handler_disconnect (watch->registry, watch->source_changed_id);
 	if (watch->source_removed_id)
 		g_signal_handler_disconnect (watch->registry, watch->source_removed_id);
+	if (watch->source_enabled_id)
+		g_signal_handler_disconnect (watch->registry, watch->source_enabled_id);
+	if (watch->source_disabled_id)
+		g_signal_handler_disconnect (watch->registry, watch->source_disabled_id);
 	if (watch->destroy)
 		watch->destroy (watch->user_data);
 	g_clear_object (&watch->registry);
@@ -345,7 +323,8 @@ mail_bridge_collect_attachment_part (CamelMimeMessage *message,
 	const gchar *content_location;
 	gboolean is_attachment;
 	gchar *display_name = NULL;
-	gchar *uri = NULL;
+	gchar *encoded_display_name = NULL;
+	gchar *token = NULL;
 	gchar *line;
 
 	(void) message;
@@ -376,21 +355,15 @@ mail_bridge_collect_attachment_part (CamelMimeMessage *message,
 	else
 		display_name = g_strdup ("Attachment");
 
-	if (content_location && *content_location)
-		uri = g_strdup (content_location);
-	else if (content_id && *content_id)
-		uri = g_strdup_printf ("cid:%s", content_id);
-	else
-		uri = g_strdup ("");
+	token = g_strdup_printf ("%u", attachments->current_index);
+	encoded_display_name = g_uri_escape_string (display_name, NULL, TRUE);
 
-	g_free (uri);
-	uri = g_strdup_printf ("pigeon-eds-attachment:%u", attachments->current_index);
-
-	line = g_strconcat (display_name, "\t", uri, NULL);
+	line = g_strconcat (encoded_display_name, "\t", token, NULL);
 	g_ptr_array_add (attachments->lines, line);
 
 	g_free (display_name);
-	g_free (uri);
+	g_free (encoded_display_name);
+	g_free (token);
 
 	return TRUE;
 }
@@ -404,8 +377,8 @@ mail_bridge_safe_filename (const gchar *filename)
 		return g_strdup ("attachment.bin");
 
 	safe = g_strdup (filename);
-	g_strdelimit (safe, "\\/:*?\"<>|", '_');
-	if (!*safe) {
+	g_strdelimit (safe, "\\/:*?\"<>|\r\n\t", '_');
+	if (!*safe || g_str_equal (safe, ".") || g_str_equal (safe, "..")) {
 		g_free (safe);
 		return g_strdup ("attachment.bin");
 	}
@@ -417,12 +390,15 @@ static gchar *
 mail_bridge_build_attachment_cache_dir (const gchar *cache_root,
 				   const gchar *cache_key)
 {
-	gchar *safe_cache_key;
+	gchar *cache_digest;
 	gchar *message_dir;
 
-	safe_cache_key = mail_bridge_safe_filename (cache_key && *cache_key ? cache_key : "message");
-	message_dir = g_build_filename (cache_root, "attachments", safe_cache_key, NULL);
-	g_free (safe_cache_key);
+	cache_digest = g_compute_checksum_for_string (
+		G_CHECKSUM_SHA256,
+		cache_key && *cache_key ? cache_key : "message",
+		-1);
+	message_dir = g_build_filename (cache_root, "attachments", cache_digest, NULL);
+	g_free (cache_digest);
 
 	return message_dir;
 }
@@ -462,34 +438,42 @@ mail_bridge_export_attachment_part (CamelMimeMessage *message,
 		CamelStream *stream;
 		CamelDataWrapper *content;
 		gchar *safe_name;
+		gchar *part_name;
+		gchar *part_dir;
 		gchar *path;
 		gchar *existing_uri;
 
 		safe_name = mail_bridge_safe_filename (filename);
-		path = g_build_filename (export_data->message_dir, safe_name, NULL);
+		part_name = g_strdup_printf ("%u", export_data->target_index);
+		part_dir = g_build_filename (export_data->message_dir, part_name, NULL);
+		path = g_build_filename (part_dir, safe_name, NULL);
 		g_free (safe_name);
+		g_free (part_name);
 
 		if (g_file_test (path, G_FILE_TEST_EXISTS)) {
 			existing_uri = g_filename_to_uri (path, NULL, &export_data->error);
 			if (existing_uri) {
 				export_data->result_uri = existing_uri;
+				g_free (part_dir);
 				g_free (path);
 				return FALSE;
 			}
 		}
 
-		if (g_mkdir_with_parents (export_data->message_dir, 0700) != 0) {
+		if (g_mkdir_with_parents (part_dir, 0700) != 0) {
 			g_set_error (
 				&export_data->error,
 				G_IO_ERROR,
 				g_io_error_from_errno (errno),
 				"Could not create attachment cache directory");
+			g_free (part_dir);
 			g_free (path);
 			return FALSE;
 		}
 
 		stream = camel_stream_fs_new_with_name (path, O_CREAT | O_TRUNC | O_WRONLY, 0600, &export_data->error);
 		if (!stream) {
+			g_free (part_dir);
 			g_free (path);
 			return FALSE;
 		}
@@ -498,6 +482,7 @@ mail_bridge_export_attachment_part (CamelMimeMessage *message,
 		if (camel_data_wrapper_decode_to_stream_sync (content, stream, NULL, &export_data->error) == -1) {
 			camel_stream_close (stream, NULL, NULL);
 			g_object_unref (stream);
+			g_free (part_dir);
 			g_free (path);
 			return FALSE;
 		}
@@ -507,6 +492,7 @@ mail_bridge_export_attachment_part (CamelMimeMessage *message,
 		g_object_unref (stream);
 
 		export_data->result_uri = g_filename_to_uri (path, NULL, &export_data->error);
+		g_free (part_dir);
 		g_free (path);
 	}
 
@@ -982,7 +968,7 @@ mail_bridge_eds_extract_attachment_to_file (CamelMimeMessage *message,
 				       GError **error)
 {
 	AttachmentExport export_data;
-	const gchar *prefix = "pigeon-eds-attachment:";
+	guint64 target_index;
 	gchar *result;
 
 	g_return_val_if_fail (CAMEL_IS_MIME_MESSAGE (message), NULL);
@@ -990,16 +976,15 @@ mail_bridge_eds_extract_attachment_to_file (CamelMimeMessage *message,
 	g_return_val_if_fail (cache_key != NULL, NULL);
 	g_return_val_if_fail (attachment_token != NULL, NULL);
 
-	if (!g_str_has_prefix (attachment_token, prefix)) {
+	target_index = g_ascii_strtoull (attachment_token, NULL, 10);
+	if (!*attachment_token ||
+	    strspn (attachment_token, "0123456789") != strlen (attachment_token) ||
+	    target_index == 0 || target_index > G_MAXUINT) {
 		g_set_error_literal (error, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT, "Invalid attachment token");
 		return NULL;
 	}
 
-	export_data.target_index = (guint) g_ascii_strtoull (attachment_token + strlen (prefix), NULL, 10);
-	if (export_data.target_index == 0) {
-		g_set_error_literal (error, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT, "Invalid attachment index");
-		return NULL;
-	}
+	export_data.target_index = (guint) target_index;
 
 	export_data.current_index = 0;
 	export_data.result_uri = NULL;
@@ -1040,6 +1025,7 @@ mail_bridge_eds_append_text_message (CamelFolder *folder,
 				const gchar *attachment_uris_serialized,
 				gboolean is_draft,
 				gchar **out_appended_uid,
+				gchar **out_message_id,
 				GError **error)
 {
 	CamelMimeMessage *message;
@@ -1052,6 +1038,8 @@ mail_bridge_eds_append_text_message (CamelFolder *folder,
 
 	if (out_appended_uid)
 		*out_appended_uid = NULL;
+	if (out_message_id)
+		*out_message_id = NULL;
 
 	message = camel_mime_message_new ();
 	if (source_uid && *source_uid)
@@ -1122,6 +1110,9 @@ mail_bridge_eds_append_text_message (CamelFolder *folder,
 		&appended_uid,
 		NULL,
 		error);
+
+	if (success && out_message_id)
+		*out_message_id = g_strdup (camel_mime_message_get_message_id (message));
 
 	g_object_unref (info);
 	g_object_unref (message);

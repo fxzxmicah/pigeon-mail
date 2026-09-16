@@ -1,4 +1,6 @@
+mod about;
 pub mod compose;
-mod dialogs;
+mod editor;
+mod settings;
 
 pub mod mailbox;

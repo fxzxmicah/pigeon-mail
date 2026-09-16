@@ -1,4 +1,3 @@
-pub mod cache;
+pub mod coordinator;
 pub mod draft;
-pub mod identity;
 pub mod mail;

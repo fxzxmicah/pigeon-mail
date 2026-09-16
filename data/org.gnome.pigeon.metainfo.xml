@@ -31,6 +31,11 @@
   </categories>
   <content_rating type="oars-1.1"/>
   <releases>
+    <release version="0.2.0" date="2026-09-17">
+      <description>
+        <p>Rework account identities around EDS, make local mailboxes the cache-first drafts and delivery boundary, and refine the adaptive mailbox, composer, and settings interfaces.</p>
+      </description>
+    </release>
     <release version="0.1.4" date="2026-08-24">
       <description>
         <p>Keep cached message switching responsive during downloads and document the Microsoft 365 alias transport fix.</p>

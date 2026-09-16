@@ -1,409 +1,359 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 use anyhow::anyhow;
-use futures::future::BoxFuture;
-
-use super::{EdsAccountBinding, MailBackend, SharedMailBackend, select_mail_backend};
-use crate::integration::journal::PendingMailActionStore;
-use crate::model::account::MailAccountId;
-use crate::model::mail::{
-    ConversationId, ConversationSummary, DraftMessage, FolderId, MailFolder, MailboxMode,
-    MessageDetail, StoredMessageRef,
+use super::actions::MessageActionQueue;
+use super::{
+    ActivatedBackend, MailBackendRouter, SharedMailBackend, SharedMailBackendRouter,
+    build_live_account_backend,
 };
-
-#[derive(Clone)]
-struct ActivatedBackend {
-    backend: SharedMailBackend,
-    mode: MailboxMode,
-}
-
-type BackendSlot = Arc<Mutex<Option<ActivatedBackend>>>;
+use crate::integration::account::EdsAccountBinding;
+use crate::model::account::MailAccountId;
 
 struct BackendPool {
-    accounts: Mutex<HashMap<MailAccountId, BackendSlot>>,
-    available_bindings: Mutex<HashMap<MailAccountId, EdsAccountBinding>>,
-    pending_mail_actions: PendingMailActionStore,
+    routes: Mutex<BackendRoutes>,
+    routing_updates: Mutex<()>,
+    stub: SharedMailBackend,
+    action_queue: MessageActionQueue,
+}
+
+#[derive(Default)]
+struct BackendRoutes {
+    catalog: HashMap<MailAccountId, EdsAccountBinding>,
+    materialized: HashMap<MailAccountId, SharedMailBackend>,
 }
 
 impl BackendPool {
     fn new() -> Self {
-        Self::with_pending_actions(PendingMailActionStore::open_default())
+        Self::with_action_queue(MessageActionQueue::new())
     }
 
-    fn with_pending_actions(pending_mail_actions: PendingMailActionStore) -> Self {
+    fn with_action_queue(action_queue: MessageActionQueue) -> Self {
         Self {
-            accounts: Mutex::new(HashMap::new()),
-            available_bindings: Mutex::new(HashMap::new()),
-            pending_mail_actions,
+            routes: Mutex::new(BackendRoutes::default()),
+            routing_updates: Mutex::new(()),
+            stub: crate::integration::stub::mail_backend(),
+            action_queue,
         }
     }
 
-    fn backend(&self, account_id: &MailAccountId) -> anyhow::Result<SharedMailBackend> {
-        let slot = self
-            .accounts
+    #[cfg(test)]
+    fn catalog_binding(&self, account_id: &MailAccountId) -> Option<EdsAccountBinding> {
+        self.routes
             .lock()
-            .map_err(|_| anyhow!("account backend pool lock poisoned"))?
+            .expect("account routes lock poisoned")
+            .catalog
             .get(account_id)
             .cloned()
-            .ok_or_else(|| anyhow!("mail account '{}' is not active", account_id.0))?;
-        let active = slot
-            .lock()
-            .map_err(|_| anyhow!("account backend slot lock poisoned"))?;
-        active
-            .as_ref()
-            .map(|entry| entry.backend.clone())
-            .ok_or_else(|| anyhow!("mail account '{}' is still activating", account_id.0))
-    }
-
-    fn activated_backend(
-        &self,
-        account_id: &MailAccountId,
-    ) -> anyhow::Result<Option<ActivatedBackend>> {
-        let slot = self
-            .accounts
-            .lock()
-            .map_err(|_| anyhow!("account backend pool lock poisoned"))?
-            .get(account_id)
-            .cloned();
-        let Some(slot) = slot else {
-            return Ok(None);
-        };
-        let activated = slot
-            .lock()
-            .map_err(|_| anyhow!("account backend slot lock poisoned"))?
-            .clone();
-        Ok(activated)
     }
 }
 
-pub fn lazy_mail_backend() -> SharedMailBackend {
-    Arc::new(BackendPool::new()) as SharedMailBackend
+pub(crate) fn mail_backend_router() -> SharedMailBackendRouter {
+    Arc::new(BackendPool::new()) as SharedMailBackendRouter
 }
 
-impl MailBackend for BackendPool {
-    fn activate_account(
-        &self,
-        account_id: &MailAccountId,
-    ) -> BoxFuture<'_, anyhow::Result<MailboxMode>> {
-        let account_id = account_id.clone();
-        Box::pin(async move {
-            if let Some(active) = self.activated_backend(&account_id)? {
-                return Ok(active.mode);
-            }
-            let binding = self
-                .available_bindings
-                .lock()
-                .map_err(|_| anyhow!("available account binding lock poisoned"))?
-                .get(&account_id)
-                .cloned()
-                .ok_or_else(|| anyhow!("mail account '{}' is unavailable", account_id.0))?;
-            let slot = {
-                let mut accounts = self
-                    .accounts
-                    .lock()
-                    .map_err(|_| anyhow!("account backend pool lock poisoned"))?;
-                accounts
-                    .entry(account_id.clone())
-                    .or_insert_with(|| Arc::new(Mutex::new(None)))
-                    .clone()
-            };
-            let mut active = slot
-                .lock()
-                .map_err(|_| anyhow!("account backend slot lock poisoned"))?;
-            if let Some(active) = active.as_ref() {
-                return Ok(active.mode);
-            }
+impl MailBackendRouter for BackendPool {
+    fn unresolved_message_action_count(&self) -> usize {
+        self.action_queue.len()
+    }
 
-            let selection = select_mail_backend(binding, self.pending_mail_actions.clone());
-            let mode = selection.mode;
-            *active = Some(ActivatedBackend {
-                backend: selection.backend,
-                mode,
+    fn activate_account(&self, account_id: &MailAccountId) -> anyhow::Result<ActivatedBackend> {
+        if crate::integration::stub::is_stub_account_id(account_id) {
+            return Ok(ActivatedBackend {
+                backend: self.stub.clone(),
+                mode: crate::model::mail::MailboxMode::NoAccount,
             });
-            Ok(mode)
+        }
+        let _routing_update = self
+            .routing_updates
+            .lock()
+            .expect("account routing update lock poisoned");
+        let binding = {
+            let routes = self
+                .routes
+                .lock()
+                .expect("account routes lock poisoned");
+            if let Some(backend) = routes.materialized.get(account_id) {
+                return Ok(ActivatedBackend {
+                    backend: backend.clone(),
+                    mode: crate::model::mail::MailboxMode::Live,
+                });
+            }
+            routes
+                .catalog
+                .get(account_id)
+                .cloned()
+                .ok_or_else(|| anyhow!("mail account '{}' is unavailable", account_id.0))?
+        };
+        let backend = build_live_account_backend(binding, self.action_queue.clone())?;
+        self.routes
+            .lock()
+            .expect("account routes lock poisoned")
+            .materialized
+            .insert(account_id.clone(), backend.clone());
+        Ok(ActivatedBackend {
+            backend,
+            mode: crate::model::mail::MailboxMode::Live,
         })
     }
 
     fn update_binding_catalog(
         &self,
         bindings: &[EdsAccountBinding],
-        invalidated_accounts: &[MailAccountId],
-    ) {
-        let catalog = bindings
+    ) -> Vec<MailAccountId> {
+        let _routing_update = self
+            .routing_updates
+            .lock()
+            .expect("account routing update lock poisoned");
+        let catalog: HashMap<_, _> = bindings
             .iter()
             .cloned()
             .map(|binding| (binding.account_id.clone(), binding))
             .collect();
-        let mut available_bindings = self
-            .available_bindings
+        let mut routes = self
+            .routes
             .lock()
-            .expect("available account binding lock poisoned");
-        let mut accounts = self
-            .accounts
-            .lock()
-            .expect("account backend pool lock poisoned");
-        *available_bindings = catalog;
-        for account_id in invalidated_accounts {
-            accounts.remove(account_id);
+            .expect("account routes lock poisoned");
+        let changed_routes = routes
+            .catalog
+            .keys()
+            .chain(catalog.keys())
+            .filter(|account_id| routes.catalog.get(*account_id) != catalog.get(*account_id))
+            .cloned()
+            .collect::<HashSet<_>>();
+        routes
+            .materialized
+            .retain(|account_id, _| !changed_routes.contains(account_id));
+        routes.catalog = catalog;
+        let mut changed_routes = changed_routes.into_iter().collect::<Vec<_>>();
+        changed_routes.sort_by(|left, right| left.0.cmp(&right.0));
+        changed_routes
+    }
+
+    fn lease_account_backend(&self, account_id: &MailAccountId) -> Option<SharedMailBackend> {
+        if crate::integration::stub::is_stub_account_id(account_id) {
+            return Some(self.stub.clone());
         }
-    }
-
-    fn eds_binding(&self, account_id: &MailAccountId) -> Option<EdsAccountBinding> {
-        let slot = self
-            .accounts
+        self.routes
             .lock()
-            .expect("account backend pool lock poisoned")
-            .get(account_id)?
-            .clone();
-        let backend = slot
-            .lock()
-            .expect("account backend slot lock poisoned")
-            .as_ref()?
-            .backend
-            .clone();
-        backend.eds_binding(account_id)
-    }
-
-    fn list_folders(
-        &self,
-        account_id: &MailAccountId,
-    ) -> BoxFuture<'_, anyhow::Result<Vec<MailFolder>>> {
-        let backend = self.backend(account_id);
-        let account_id = account_id.clone();
-        Box::pin(async move { backend?.list_folders(&account_id).await })
-    }
-
-    fn list_conversations(
-        &self,
-        account_id: &MailAccountId,
-        folder_id: &FolderId,
-        offset: usize,
-        limit: usize,
-    ) -> BoxFuture<'_, anyhow::Result<Vec<ConversationSummary>>> {
-        let backend = self.backend(account_id);
-        let account_id = account_id.clone();
-        let folder_id = folder_id.clone();
-        Box::pin(async move {
-            backend?
-                .list_conversations(&account_id, &folder_id, offset, limit)
-                .await
-        })
-    }
-
-    fn get_message_detail(
-        &self,
-        account_id: &MailAccountId,
-        conversation_id: &ConversationId,
-    ) -> BoxFuture<'_, anyhow::Result<Option<MessageDetail>>> {
-        let backend = self.backend(account_id);
-        let account_id = account_id.clone();
-        let conversation_id = conversation_id.clone();
-        Box::pin(async move {
-            backend?
-                .get_message_detail(&account_id, &conversation_id)
-                .await
-        })
-    }
-
-    fn get_cached_message_detail(
-        &self,
-        account_id: &MailAccountId,
-        conversation_id: &ConversationId,
-    ) -> BoxFuture<'_, anyhow::Result<Option<MessageDetail>>> {
-        let backend = self.backend(account_id);
-        let account_id = account_id.clone();
-        let conversation_id = conversation_id.clone();
-        Box::pin(async move {
-            backend?
-                .get_cached_message_detail(&account_id, &conversation_id)
-                .await
-        })
-    }
-
-    fn open_attachment(
-        &self,
-        account_id: &MailAccountId,
-        conversation_id: &ConversationId,
-        attachment_uri: &str,
-    ) -> BoxFuture<'_, anyhow::Result<Option<String>>> {
-        let backend = self.backend(account_id);
-        let account_id = account_id.clone();
-        let conversation_id = conversation_id.clone();
-        let attachment_uri = attachment_uri.to_string();
-        Box::pin(async move {
-            backend?
-                .open_attachment(&account_id, &conversation_id, &attachment_uri)
-                .await
-        })
-    }
-
-    fn search(
-        &self,
-        account_id: &MailAccountId,
-        query: &str,
-    ) -> BoxFuture<'_, anyhow::Result<Vec<ConversationSummary>>> {
-        let backend = self.backend(account_id);
-        let account_id = account_id.clone();
-        let query = query.to_string();
-        Box::pin(async move { backend?.search(&account_id, &query).await })
-    }
-
-    fn refresh(&self, account_id: &MailAccountId) -> BoxFuture<'_, anyhow::Result<()>> {
-        let backend = self.backend(account_id);
-        let account_id = account_id.clone();
-        Box::pin(async move { backend?.refresh(&account_id).await })
-    }
-
-    fn set_starred(
-        &self,
-        account_id: &MailAccountId,
-        conversation_id: &ConversationId,
-        starred: bool,
-    ) -> BoxFuture<'_, anyhow::Result<()>> {
-        let backend = self.backend(account_id);
-        let account_id = account_id.clone();
-        let conversation_id = conversation_id.clone();
-        Box::pin(async move {
-            backend?
-                .set_starred(&account_id, &conversation_id, starred)
-                .await
-        })
-    }
-
-    fn set_read(
-        &self,
-        account_id: &MailAccountId,
-        conversation_id: &ConversationId,
-        read: bool,
-    ) -> BoxFuture<'_, anyhow::Result<()>> {
-        let backend = self.backend(account_id);
-        let account_id = account_id.clone();
-        let conversation_id = conversation_id.clone();
-        Box::pin(async move { backend?.set_read(&account_id, &conversation_id, read).await })
-    }
-
-    fn move_to_folder(
-        &self,
-        account_id: &MailAccountId,
-        conversation_id: &ConversationId,
-        folder_id: &FolderId,
-    ) -> BoxFuture<'_, anyhow::Result<()>> {
-        let backend = self.backend(account_id);
-        let account_id = account_id.clone();
-        let conversation_id = conversation_id.clone();
-        let folder_id = folder_id.clone();
-        Box::pin(async move {
-            backend?
-                .move_to_folder(&account_id, &conversation_id, &folder_id)
-                .await
-        })
-    }
-
-    fn save_draft(
-        &self,
-        draft: &DraftMessage,
-    ) -> BoxFuture<'_, anyhow::Result<Option<StoredMessageRef>>> {
-        let backend = self.backend(&draft.account_id);
-        let draft = draft.clone();
-        Box::pin(async move { backend?.save_draft(&draft).await })
-    }
-
-    fn send_draft(&self, draft: &DraftMessage) -> BoxFuture<'_, anyhow::Result<bool>> {
-        let backend = self.backend(&draft.account_id);
-        let draft = draft.clone();
-        Box::pin(async move { backend?.send_draft(&draft).await })
+            .expect("account routes lock poisoned")
+            .materialized
+            .get(account_id)
+            .cloned()
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{Arc, Mutex};
+    use std::sync::Arc;
 
-    use super::{ActivatedBackend, BackendPool};
-    use crate::integration::backend::{EdsAccountBinding, MailBackend, stub_backend};
-    use crate::integration::journal::PendingMailActionStore;
+    use super::super::actions::MessageActionQueue;
+    use super::BackendPool;
+    use crate::integration::account::EdsAccountBinding;
+    use crate::integration::backend::{
+        AccountBackend, MailBackendRouter, SharedMailBackend,
+    };
     use crate::model::account::MailAccountId;
-    use crate::model::mail::MailboxMode;
+    use crate::model::mail::{ConversationId, DraftMessage, WriteOutcome};
 
     #[test]
     fn unknown_accounts_are_not_materialized_as_stub_backends() {
         let unknown = MailAccountId("unknown-account".into());
-        let pool = BackendPool::with_pending_actions(test_pending_actions());
+        let pool = BackendPool::with_action_queue(test_action_queue());
 
-        assert!(futures::executor::block_on(pool.activate_account(&unknown)).is_err());
-        assert!(pool.accounts.lock().unwrap().is_empty());
+        assert!(pool.activate_account(&unknown).is_err());
+        assert!(pool.routes.lock().unwrap().materialized.is_empty());
     }
 
     #[test]
-    fn catalog_changes_preserve_half_active_backends_until_explicit_invalidation() {
-        let active = MailAccountId("active-account".into());
-        let half_active = MailAccountId("half-active-account".into());
-        let inactive = MailAccountId("inactive-account".into());
-        let pool = BackendPool::with_pending_actions(test_pending_actions());
-        let active_backend = install_activated_stub(&pool, active.clone());
-        let half_active_backend = install_activated_stub(&pool, half_active.clone());
-        pool.update_binding_catalog(&[binding("inactive-account")], &[]);
-        assert!(!Arc::ptr_eq(&active_backend, &half_active_backend));
-        assert_eq!(
-            futures::executor::block_on(pool.activate_account(&active)).unwrap(),
-            MailboxMode::StubUnavailable
+    fn stub_operations_use_normal_routing_without_materialization() {
+        let pool = BackendPool::with_action_queue(test_action_queue());
+        let account_id = crate::integration::stub::stub_account_id();
+        let conversation_id = ConversationId("stub-account".into());
+        let mut draft = DraftMessage::empty(
+            account_id.clone(),
+            "Stub Sender <stub@example.invalid>".into(),
         );
-        assert!(Arc::ptr_eq(
-            &active_backend,
-            &pool.backend(&active).unwrap()
-        ));
-        assert!(futures::executor::block_on(pool.list_folders(&inactive)).is_err());
-        assert_eq!(pool.accounts.lock().unwrap().len(), 2);
+
+        let activated = pool.activate_account(&account_id).unwrap();
+        assert!(Arc::ptr_eq(&activated.backend, &pool.stub));
+        assert_eq!(
+            activated.mode,
+            crate::model::mail::MailboxMode::NoAccount
+        );
+        assert!(activated.backend.open_change_monitor(Arc::new(|| {})).is_ok());
+        activated.backend.refresh().unwrap();
+
+        let folders = activated.backend.list_folders().unwrap();
+        assert!(!folders.is_empty());
+        let conversations = activated.backend.list_conversations(
+            &folders[0].id,
+            0,
+            crate::model::mail::CONVERSATION_PAGE_SIZE,
+        )
+        .unwrap();
+        assert!(!conversations.is_empty());
+
+        assert_eq!(
+            activated.backend.set_read(&conversation_id, true).unwrap(),
+            WriteOutcome::Unchanged
+        );
+        assert!(activated
+            .backend
+            .queue_delivery(&draft.clone().into_prepared().unwrap())
+            .is_err());
+        draft.to.push("recipient@example.invalid".into());
+        let prepared = draft.into_prepared().unwrap();
         assert!(
-            pool.available_bindings
+            activated.backend.save_draft(&prepared).unwrap().is_none()
+        );
+        assert_eq!(
+            activated.backend.queue_delivery(&prepared).unwrap(),
+            WriteOutcome::Unchanged
+        );
+        assert!(pool.routes.lock().unwrap().materialized.is_empty());
+    }
+
+    #[test]
+    fn catalog_binding_is_available_without_mailbox_activation() {
+        let pool = BackendPool::with_action_queue(test_action_queue());
+        let account_id = MailAccountId("settings-target".into());
+        let initial = binding(&account_id.0);
+        assert_eq!(
+            pool.update_binding_catalog(std::slice::from_ref(&initial)),
+            [account_id.clone()]
+        );
+        assert!(
+            pool.update_binding_catalog(std::slice::from_ref(&initial))
+                .is_empty()
+        );
+
+        let mut changed = initial;
+        changed.route_fingerprint.mailbox = 1;
+        assert_eq!(
+            pool.update_binding_catalog(std::slice::from_ref(&changed)),
+            [account_id.clone()]
+        );
+
+        let resolved = pool
+            .catalog_binding(&account_id)
+            .expect("settings writes should resolve an inactive catalog account");
+
+        assert_eq!(resolved, changed);
+        assert!(pool.routes.lock().unwrap().materialized.is_empty());
+    }
+
+    #[test]
+    fn failed_activation_does_not_install_an_unavailable_backend() {
+        let pool = BackendPool::with_action_queue(test_action_queue());
+        let account_id = MailAccountId("unavailable-account".into());
+        pool.update_binding_catalog(&[binding(&account_id.0)]);
+
+        assert!(pool.activate_account(&account_id).is_err());
+        assert!(!pool
+            .routes
+            .lock()
+            .unwrap()
+            .materialized
+            .contains_key(&account_id));
+        assert!(pool.activate_account(&account_id).is_err());
+    }
+
+    #[test]
+    fn catalog_diff_preserves_unchanged_routes_and_retires_removed_routes() {
+        let retained = MailAccountId("retained-account".into());
+        let removed = MailAccountId("removed-account".into());
+        let unmaterialized = MailAccountId("unmaterialized-account".into());
+        let pool = BackendPool::with_action_queue(test_action_queue());
+        let retained_backend = install_activated_backend(&pool, retained.clone());
+        let removed_backend = install_activated_backend(&pool, removed.clone());
+        let changed = pool.update_binding_catalog(&[
+            binding("retained-account"),
+            binding("removed-account"),
+            binding("unmaterialized-account"),
+        ]);
+        assert_eq!(changed, [unmaterialized.clone()]);
+        assert!(!Arc::ptr_eq(&retained_backend, &removed_backend));
+        let retained_lease = pool.activate_account(&retained).unwrap();
+        assert!(Arc::ptr_eq(&retained_backend, &retained_lease.backend));
+        assert!(Arc::ptr_eq(
+            &retained_backend,
+            &pool.lease_account_backend(&retained).unwrap()
+        ));
+        assert!(pool.lease_account_backend(&unmaterialized).is_none());
+        assert_eq!(pool.routes.lock().unwrap().materialized.len(), 2);
+        assert!(
+            pool.routes
                 .lock()
                 .unwrap()
-                .contains_key(&inactive)
+                .catalog
+                .contains_key(&unmaterialized)
         );
 
-        pool.update_binding_catalog(&[], &[]);
+        let removed_lease = pool.activate_account(&removed).unwrap();
+        assert!(Arc::ptr_eq(&removed_backend, &removed_lease.backend));
+        assert!(Arc::ptr_eq(
+            &removed_backend,
+            &pool.lease_account_backend(&removed).unwrap()
+        ));
+
+        let changed = pool.update_binding_catalog(&[binding("retained-account")]);
+        assert_eq!(changed, [removed.clone(), unmaterialized]);
+        assert!(pool.activate_account(&removed).is_err());
+        assert!(Arc::ptr_eq(&removed_backend, &removed_lease.backend));
+        assert!(Arc::ptr_eq(
+            &retained_backend,
+            &pool.lease_account_backend(&retained).unwrap()
+        ));
+        assert_eq!(pool.routes.lock().unwrap().materialized.len(), 1);
+    }
+
+    #[test]
+    fn leased_backend_survives_future_route_invalidation() {
+        let account_id = MailAccountId("draining-account".into());
+        let pool = BackendPool::with_action_queue(test_action_queue());
+        let backend = install_activated_backend(&pool, account_id.clone());
+        let lease = pool
+            .lease_account_backend(&account_id)
+            .expect("a materialized account should be leasable");
+        assert!(Arc::ptr_eq(&backend, &lease));
+
+        pool.update_binding_catalog(&[]);
+
+        assert!(pool.lease_account_backend(&account_id).is_none());
+        assert!(Arc::ptr_eq(&backend, &lease));
+    }
+
+    #[test]
+    fn changed_route_retires_the_previous_backend_before_lazy_reactivation() {
+        let account_id = MailAccountId("changed-account".into());
+        let pool = BackendPool::with_action_queue(test_action_queue());
+        let _previous_lease = install_activated_backend(&pool, account_id.clone());
+        let mut changed_binding = binding(&account_id.0);
+        changed_binding.transport_backend_name = "changed".into();
+
         assert_eq!(
-            futures::executor::block_on(pool.activate_account(&half_active)).unwrap(),
-            MailboxMode::StubUnavailable
+            pool.update_binding_catalog(std::slice::from_ref(&changed_binding)),
+            [account_id.clone()]
         );
-        assert!(Arc::ptr_eq(
-            &half_active_backend,
-            &pool.backend(&half_active).unwrap()
-        ));
-
-        pool.update_binding_catalog(&[], std::slice::from_ref(&half_active));
-        assert!(futures::executor::block_on(pool.activate_account(&half_active)).is_err());
-        assert!(Arc::ptr_eq(
-            &active_backend,
-            &pool.backend(&active).unwrap()
-        ));
-        assert_eq!(pool.accounts.lock().unwrap().len(), 1);
+        assert!(pool.lease_account_backend(&account_id).is_none());
+        assert_eq!(pool.catalog_binding(&account_id), Some(changed_binding));
+        assert!(pool.activate_account(&account_id).is_err());
     }
 
-    fn test_pending_actions() -> PendingMailActionStore {
-        PendingMailActionStore::open(
-            std::env::temp_dir()
-                .join(format!(
-                    "mail-backend-pool-test-{}",
-                    glib::uuid_string_random()
-                ))
-                .join("pending-mail-actions.json"),
-        )
+    fn test_action_queue() -> MessageActionQueue {
+        MessageActionQueue::new()
     }
 
-    fn install_activated_stub(
+    fn install_activated_backend(
         pool: &BackendPool,
         account_id: MailAccountId,
-    ) -> crate::integration::backend::SharedMailBackend {
-        let backend = stub_backend();
-        pool.accounts.lock().unwrap().insert(
-            account_id,
-            Arc::new(Mutex::new(Some(ActivatedBackend {
-                backend: backend.clone(),
-                mode: MailboxMode::StubUnavailable,
-            }))),
-        );
+    ) -> SharedMailBackend {
+        let backend =
+            Arc::new(AccountBackend::for_test(binding(&account_id.0))) as SharedMailBackend;
+        let mut routes = pool.routes.lock().unwrap();
+        routes.catalog.insert(account_id.clone(), binding(&account_id.0));
+        routes.materialized.insert(account_id, backend.clone());
         backend
     }
 
@@ -418,8 +368,11 @@ mod tests {
             transport_uid: format!("{id}-transport"),
             transport_backend_name: "test".into(),
             transport_auth_method: None,
-            drafts_folder: None,
-            sent_folder: None,
+            route_fingerprint: crate::integration::account::RouteFingerprint {
+                account: 0,
+                transport: 0,
+                mailbox: 0,
+            },
         }
     }
 }

@@ -5,11 +5,14 @@ use std::ptr;
 use std::sync::Arc;
 
 use anyhow::{Result, anyhow};
+use percent_encoding::percent_decode_str;
 
-use crate::integration::backend::EdsAccountBinding;
+use super::{OwnedGObject, OwnedGlibString, take_gerror};
+use crate::integration::account::EdsAccountBinding;
 use crate::model::mail::{
-    AttachmentInfo, ConversationId, ConversationSummary, FolderId, FolderKind, MailFolder,
-    MessageBody, MessageDetail, MessageId, StoredMessageRef,
+    AttachmentInfo, AttachmentLocation, ConversationId, ConversationSummary, FolderId, FolderKind,
+    MailFolder, MessageBody, MessageDetail, MessageId, StoredMessageRef,
+    sort_and_deduplicate_conversations, sort_conversations,
 };
 
 #[cfg(debug_assertions)]
@@ -21,7 +24,11 @@ macro_rules! development_probe_log {
 
 #[cfg(not(debug_assertions))]
 macro_rules! development_probe_log {
-    ($($arg:tt)*) => {};
+    ($($arg:tt)*) => {
+        if false {
+            let _ = format_args!($($arg)*);
+        }
+    };
 }
 
 const CAMEL_PROVIDER_STORE: c_int = 0;
@@ -43,11 +50,15 @@ const CAMEL_FOLDER_TYPE_DRAFTS: c_uint = 12 << CAMEL_FOLDER_TYPE_BIT;
 const CAMEL_MESSAGE_FLAGGED: c_uint = 1 << 3;
 const CAMEL_MESSAGE_SEEN: c_uint = 1 << 4;
 const CAMEL_MESSAGE_DELETED: c_uint = 1 << 1;
+const CAMEL_MESSAGE_DRAFT: c_uint = 1 << 2;
 const CAMEL_MESSAGE_ATTACHMENTS: c_uint = 1 << 5;
 const CAMEL_MESSAGE_FOLDER_FLAGGED: c_uint = 1 << 16;
-const SUBMITTED_USER_FLAG: &str = "$PigeonSubmitted";
-const LOCAL_SENT_USER_FLAG: &str = "$PigeonLocalSent";
-const DRAFT_SYNCED_USER_FLAG: &str = "$PigeonDraftSynced";
+const DELIVERY_STATE_USER_TAG: &str = "$DeliveryState";
+pub(crate) const DELIVERY_SUBMITTING: &str = "submitting";
+pub(crate) const DELIVERY_PROVIDER_COPY: &str = "provider-copy";
+pub(crate) const DELIVERY_COPY_REQUIRED: &str = "copy-required";
+const DRAFT_SYNCED_USER_FLAG: &str = "$DraftSynced";
+const DRAFT_SUPERSEDED_USER_FLAG: &str = "$DraftSuperseded";
 const CONVERSATION_ID_SEPARATOR: char = '\u{1f}';
 const CAMEL_RECIPIENT_TYPE_TO: &[u8] = b"To\0";
 const CAMEL_RECIPIENT_TYPE_CC: &[u8] = b"Cc\0";
@@ -85,31 +96,69 @@ enum CamelMessageInfo {}
 enum CamelMimeMessage {}
 enum CamelInternetAddress {}
 
+struct OwnedPtrArray(*mut glib::ffi::GPtrArray);
+
+impl OwnedPtrArray {
+    unsafe fn from_ptr(pointer: *mut glib::ffi::GPtrArray) -> Option<Self> {
+        (!pointer.is_null()).then_some(Self(pointer))
+    }
+
+    fn as_ptr(&self) -> *mut glib::ffi::GPtrArray {
+        self.0
+    }
+
+    fn len(&self) -> usize {
+        unsafe { (*self.0).len as usize }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    fn values(&self) -> Result<Vec<glib::ffi::gpointer>> {
+        let len = self.len();
+        if len == 0 {
+            return Ok(Vec::new());
+        }
+        let values = unsafe { (*self.0).pdata };
+        if values.is_null() {
+            return Err(anyhow!("GPtrArray contains elements without storage"));
+        }
+        Ok(unsafe { std::slice::from_raw_parts(values, len) }.to_vec())
+    }
+}
+
+impl Drop for OwnedPtrArray {
+    fn drop(&mut self) {
+        unsafe { glib::ffi::g_ptr_array_unref(self.0) };
+    }
+}
+
 pub(crate) struct AccountSession {
     account_uid: String,
     backend_name: String,
     auth_method: String,
-    service_uid: String,
     access_mode: CamelAccessMode,
-    registry: *mut ESourceRegistry,
-    account_source: *mut ESource,
-    config_source: *mut ESource,
-    session: *mut CamelSession,
-    service: *mut CamelService,
+    resources: CamelSessionResources,
     store: *mut CamelStore,
 }
 
 pub(crate) struct TransportSession {
+    _resources: CamelSessionResources,
+    transport: *mut CamelTransport,
+}
+
+struct CamelSessionResources {
+    service_uid: String,
     registry: *mut ESourceRegistry,
     account_source: *mut ESource,
     config_source: *mut ESource,
     session: *mut CamelSession,
     service: *mut CamelService,
-    transport: *mut CamelTransport,
 }
 
 pub(crate) struct ChangeMonitor {
-    _session_guard: AccountSession,
+    session: Option<AccountSession>,
     folders: Vec<WatchedFolder>,
 }
 
@@ -127,7 +176,14 @@ unsafe impl Send for ChangeMonitor {}
 #[derive(Clone, Copy)]
 enum CamelAccessMode {
     CachedOnly,
+    Local,
     Online,
+}
+
+impl CamelAccessMode {
+    fn may_load_message(self) -> bool {
+        matches!(self, Self::Local | Self::Online)
+    }
 }
 
 type ChangeCallback = Arc<dyn Fn() + Send + Sync>;
@@ -137,47 +193,59 @@ impl ChangeMonitor {
         binding: &EdsAccountBinding,
         callback: impl Fn() + Send + Sync + 'static,
     ) -> Result<Self> {
+        let started = std::time::Instant::now();
         tracing::debug!(
             target: "pigeon::eds",
-            "active account change monitor connecting"
+            "foreground account change monitor connecting"
         );
         let mut session = AccountSession::open_online(binding)?;
+        development_probe_log!(
+            "change monitor online session connected in {:?}",
+            started.elapsed()
+        );
         let callback: ChangeCallback = Arc::new(callback);
-        let mut folders = Vec::new();
+        let folder_infos = session.list_folders()?;
+        development_probe_log!(
+            "change monitor discovered {} folders in {:?}",
+            folder_infos.len(),
+            started.elapsed()
+        );
+        let store = session.store;
+        let mut monitor = Self {
+            session: Some(session),
+            folders: Vec::with_capacity(folder_infos.len()),
+        };
 
-        for folder_info in session.list_folders()? {
-            let folder = match unsafe { get_folder(session.store, &folder_info.id.0) } {
-                Ok(folder) => folder,
-                Err(error) => {
-                    development_probe_log!(
-                        "change monitor skipped folder {}: {}",
-                        folder_info.id.0,
-                        error
-                    );
-                    drop(error);
-                    continue;
-                }
-            };
+        for folder_info in folder_infos {
+            let folder = unsafe { get_folder(store, &folder_info.id.0) }?;
             let user_data = Box::into_raw(Box::new(Arc::clone(&callback))) as *mut c_void;
             let handler_id = unsafe {
                 mail_bridge_camel_folder_watch_changes(
-                    folder,
+                    folder.as_ptr(),
                     Some(invoke_change_callback),
                     user_data,
                     Some(drop_change_callback),
                 )
             };
             if handler_id == 0 {
-                unsafe {
-                    drop_change_callback(user_data);
-                    glib::gobject_ffi::g_object_unref(folder as *mut _);
-                }
-                continue;
+                unsafe { drop_change_callback(user_data) };
+                return Err(anyhow!(
+                    "failed to subscribe to Camel folder '{}' changes",
+                    folder_info.id.0
+                ));
             }
-            folders.push(WatchedFolder { folder, handler_id });
+            monitor.folders.push(WatchedFolder {
+                folder: folder.into_raw(),
+                handler_id,
+            });
+            development_probe_log!(
+                "change monitor subscribed folder {} in {:?}",
+                folder_info.id.0,
+                started.elapsed()
+            );
         }
 
-        if folders.is_empty() {
+        if monitor.folders.is_empty() {
             return Err(anyhow!(
                 "Camel account exposes no folders that can be monitored"
             ));
@@ -185,13 +253,11 @@ impl ChangeMonitor {
 
         tracing::debug!(
             target: "pigeon::eds",
-            folders = folders.len(),
-            "active account change monitor connected"
+            folders = monitor.folders.len(),
+            elapsed = ?started.elapsed(),
+            "foreground account change monitor connected"
         );
-        Ok(Self {
-            _session_guard: session,
-            folders,
-        })
+        Ok(monitor)
     }
 }
 
@@ -208,9 +274,9 @@ unsafe extern "C" fn drop_change_callback(user_data: *mut c_void) {
 pub(crate) struct MessageSyncState {
     pub(crate) conversation_id: ConversationId,
     pub(crate) message_id_hash: u64,
-    pub(crate) submitted: bool,
-    pub(crate) local_sent_fallback: bool,
+    pub(crate) delivery_state: Option<String>,
     pub(crate) draft_synced: bool,
+    pub(crate) draft_superseded: bool,
 }
 
 #[repr(C)]
@@ -223,6 +289,24 @@ struct CamelFolderInfo {
     flags: c_uint,
     unread: c_int,
     total: c_int,
+}
+
+struct OwnedFolderInfo(*mut CamelFolderInfo);
+
+impl OwnedFolderInfo {
+    unsafe fn from_ptr(pointer: *mut CamelFolderInfo) -> Option<Self> {
+        (!pointer.is_null()).then_some(Self(pointer))
+    }
+
+    fn as_ptr(&self) -> *mut CamelFolderInfo {
+        self.0
+    }
+}
+
+impl Drop for OwnedFolderInfo {
+    fn drop(&mut self) {
+        unsafe { camel_folder_info_free(self.0) };
+    }
 }
 
 #[allow(clashing_extern_declarations)]
@@ -338,12 +422,20 @@ unsafe extern "C" {
         folder: *mut CamelFolder,
         uid: *const c_char,
     ) -> *mut CamelMessageInfo;
-    fn camel_message_info_get_uid(info: *const CamelMessageInfo) -> *const c_char;
     fn camel_message_info_get_flags(info: *const CamelMessageInfo) -> c_uint;
     fn camel_message_info_get_message_id(info: *const CamelMessageInfo) -> u64;
     fn camel_message_info_get_user_flag(
         info: *const CamelMessageInfo,
         name: *const c_char,
+    ) -> glib::ffi::gboolean;
+    fn camel_message_info_get_user_tag(
+        info: *const CamelMessageInfo,
+        name: *const c_char,
+    ) -> *const c_char;
+    fn camel_message_info_set_user_tag(
+        info: *mut CamelMessageInfo,
+        name: *const c_char,
+        value: *const c_char,
     ) -> glib::ffi::gboolean;
     fn camel_message_info_set_user_flag(
         info: *mut CamelMessageInfo,
@@ -379,6 +471,8 @@ unsafe extern "C" {
         namep: *mut *const c_char,
         addressp: *mut *const c_char,
     ) -> glib::ffi::gboolean;
+    fn camel_internet_address_new() -> *mut CamelInternetAddress;
+    fn camel_address_decode(address: *mut c_void, raw: *const c_char) -> c_int;
 
     fn e_source_registry_new_sync(
         cancellable: *mut gio::ffi::GCancellable,
@@ -441,6 +535,7 @@ unsafe extern "C" {
         attachment_uris_serialized: *const c_char,
         is_draft: glib::ffi::gboolean,
         out_appended_uid: *mut *mut c_char,
+        out_message_id: *mut *mut c_char,
         error: *mut *mut glib::ffi::GError,
     ) -> glib::ffi::gboolean;
     fn mail_bridge_eds_append_cached_message(
@@ -460,6 +555,73 @@ unsafe extern "C" {
     ) -> glib::ffi::gboolean;
 }
 
+impl CamelSessionResources {
+    fn empty() -> Self {
+        Self {
+            service_uid: String::new(),
+            registry: ptr::null_mut(),
+            account_source: ptr::null_mut(),
+            config_source: ptr::null_mut(),
+            session: ptr::null_mut(),
+            service: ptr::null_mut(),
+        }
+    }
+
+    unsafe fn open(
+        account_source_uid: &str,
+        backend_name: &str,
+        source_kind: &str,
+        provider_type: c_int,
+        online: bool,
+    ) -> Result<Self> {
+        let mut resources = Self::empty();
+        resources.registry = unsafe { new_registry()? };
+        resources.account_source = unsafe { ref_source(resources.registry, account_source_uid) }
+            .ok_or_else(|| {
+                anyhow!(
+                    "EDS registry could not resolve {} source {}",
+                    source_kind,
+                    account_source_uid
+                )
+            })?;
+        resources.config_source = unsafe {
+            ref_service_config_source(
+                resources.registry,
+                resources.account_source,
+                backend_name,
+            )
+        }
+        .ok_or_else(|| {
+            anyhow!(
+                "could not find an EDS source with Camel backend extension for {} '{}' and backend '{}'",
+                source_kind,
+                account_source_uid,
+                backend_name
+            )
+        })?;
+        resources.session = unsafe { mail_bridge_eds_session_new(resources.registry) };
+        if resources.session.is_null() {
+            return Err(anyhow!("mail_bridge_eds_session_new returned NULL"));
+        }
+        resources.service_uid = unsafe { source_uid(resources.config_source) }
+            .ok_or_else(|| anyhow!("{} EDS config source has no uid", source_kind))?;
+        unsafe { camel_session_set_online(resources.session, if online { 1 } else { 0 }) };
+        resources.service = unsafe {
+            add_service(
+                resources.session,
+                &resources.service_uid,
+                backend_name,
+                provider_type,
+            )?
+        };
+        unsafe {
+            e_source_camel_configure_service(resources.config_source, resources.service);
+        }
+        Ok(resources)
+    }
+
+}
+
 impl AccountSession {
     pub(crate) fn open_cached(binding: &EdsAccountBinding) -> Result<Self> {
         Self::open_with_mode(binding, CamelAccessMode::CachedOnly)
@@ -469,21 +631,12 @@ impl AccountSession {
         Self::open_with_mode(binding, CamelAccessMode::Online)
     }
 
-    pub(crate) fn open_cached_source(account_source_uid: &str, backend_name: &str) -> Result<Self> {
+    pub(crate) fn open_local_mailbox() -> Result<Self> {
         Self::open_source_with_mode(
-            account_source_uid,
-            backend_name,
+            "local",
+            "maildir",
             "unknown",
-            CamelAccessMode::CachedOnly,
-        )
-    }
-
-    pub(crate) fn open_online_source(account_source_uid: &str, backend_name: &str) -> Result<Self> {
-        Self::open_source_with_mode(
-            account_source_uid,
-            backend_name,
-            "unknown",
-            CamelAccessMode::Online,
+            CamelAccessMode::Local,
         )
     }
 
@@ -509,61 +662,27 @@ impl AccountSession {
         let auth_method = auth_method.to_string();
 
         unsafe {
-            let registry = new_registry()?;
-            let account_source = ref_source(registry, &account_uid).ok_or_else(|| {
-                anyhow!(
-                    "EDS registry could not resolve account source {}",
-                    account_uid
-                )
-            })?;
-            let config_source = find_service_config_source(registry, account_source, &backend_name)
-                .ok_or_else(|| {
-                    anyhow!(
-                        "could not find an EDS source with Camel backend extension for account '{}' and backend '{}'",
-                        account_uid,
-                        backend_name
-                    )
-                })?;
-            if config_source == account_source {
-                glib::gobject_ffi::g_object_ref(config_source as *mut _);
-            }
-            let session = mail_bridge_eds_session_new(registry);
-            if session.is_null() {
-                glib::gobject_ffi::g_object_unref(config_source as *mut _);
-                glib::gobject_ffi::g_object_unref(account_source as *mut _);
-                glib::gobject_ffi::g_object_unref(registry as *mut _);
-                return Err(anyhow!("mail_bridge_eds_session_new returned NULL"));
-            }
-
-            let service_uid =
-                source_uid(config_source).ok_or_else(|| anyhow!("EDS config source has no uid"))?;
-            camel_session_set_online(
-                session,
-                match mode {
-                    CamelAccessMode::CachedOnly => 0,
-                    CamelAccessMode::Online => 1,
-                },
-            );
-            let service = add_service(session, &service_uid, &backend_name, CAMEL_PROVIDER_STORE)?;
-            e_source_camel_configure_service(config_source, service);
-            configure_local_store_path(config_source, service)?;
-
+            let resources = CamelSessionResources::open(
+                &account_uid,
+                &backend_name,
+                "account",
+                CAMEL_PROVIDER_STORE,
+                matches!(mode, CamelAccessMode::Online),
+            )?;
+            configure_local_store_path(resources.config_source, resources.service)?;
             let mut this = Self {
                 account_uid,
                 backend_name,
                 auth_method,
-                service_uid,
                 access_mode: mode,
-                registry,
-                account_source,
-                config_source,
-                session,
-                service,
+                resources,
                 store: ptr::null_mut(),
             };
             this.ensure_store()?;
             match mode {
-                CamelAccessMode::CachedOnly => this.ensure_store_offline()?,
+                CamelAccessMode::CachedOnly | CamelAccessMode::Local => {
+                    this.ensure_store_offline()?
+                }
                 CamelAccessMode::Online => this.ensure_connected()?,
             }
             Ok(this)
@@ -581,6 +700,14 @@ impl AccountSession {
         limit: usize,
     ) -> Result<Vec<ConversationSummary>> {
         unsafe { load_folder_conversations(self.store, folder_id, offset, limit) }
+    }
+
+    pub(crate) fn prepare_folder_for_synchronization(
+        &mut self,
+        folder_id: &FolderId,
+    ) -> Result<()> {
+        drop(unsafe { get_folder(self.store, &folder_id.0) }?);
+        Ok(())
     }
 
     pub(crate) fn list_message_sync_states(
@@ -601,14 +728,7 @@ impl AccountSession {
                 search_folder_conversations(self.store, &folder.id, &expression)?
             });
         }
-        results.sort_by(|left, right| {
-            right
-                .last_updated_unix_ms
-                .cmp(&left.last_updated_unix_ms)
-                .then_with(|| left.subject.cmp(&right.subject))
-        });
-        let mut seen = std::collections::HashSet::new();
-        results.retain(|summary| seen.insert(summary.id.clone()));
+        sort_and_deduplicate_conversations(&mut results);
         Ok(results)
     }
 
@@ -623,19 +743,43 @@ impl AccountSession {
         unsafe { search_folder_conversations(self.store, folder_id, &expression) }
     }
 
-    pub(crate) fn set_submitted(
+    pub(crate) fn begin_submission(
         &mut self,
         conversation_id: &ConversationId,
-        submitted: bool,
     ) -> Result<()> {
-        self.set_message_user_flag(conversation_id, SUBMITTED_USER_FLAG, submitted)
+        self.set_delivery_state(conversation_id, DELIVERY_SUBMITTING)
     }
 
-    pub(crate) fn set_local_sent_fallback(
+    pub(crate) fn complete_submission(
         &mut self,
         conversation_id: &ConversationId,
+        provider_copy_expected: bool,
     ) -> Result<()> {
-        self.set_message_user_flag(conversation_id, LOCAL_SENT_USER_FLAG, true)
+        self.set_delivery_state(
+            conversation_id,
+            if provider_copy_expected {
+                DELIVERY_PROVIDER_COPY
+            } else {
+                DELIVERY_COPY_REQUIRED
+            },
+        )
+    }
+
+    fn set_delivery_state(
+        &mut self,
+        conversation_id: &ConversationId,
+        state: &str,
+    ) -> Result<()> {
+        let (folder_name, uid) = conversation_location(conversation_id)?;
+        unsafe {
+            set_message_user_tag(
+                self.store,
+                folder_name,
+                uid,
+                DELIVERY_STATE_USER_TAG,
+                state,
+            )
+        }
     }
 
     pub(crate) fn set_draft_synced(
@@ -646,26 +790,52 @@ impl AccountSession {
         self.set_message_user_flag(conversation_id, DRAFT_SYNCED_USER_FLAG, synced)
     }
 
+    pub(crate) fn set_draft_superseded(
+        &mut self,
+        conversation_id: &ConversationId,
+        superseded: bool,
+    ) -> Result<()> {
+        self.set_message_user_flag(
+            conversation_id,
+            DRAFT_SUPERSEDED_USER_FLAG,
+            superseded,
+        )
+    }
+
     pub(crate) fn append_cached_draft_from(
         &mut self,
         source: &mut AccountSession,
         source_conversation_id: &ConversationId,
         destination_folder_id: &FolderId,
     ) -> Result<()> {
-        let Some((source_folder_name, message_uid)) =
-            split_conversation_id(&source_conversation_id.0)
-        else {
-            return Err(anyhow!(
-                "conversation id does not contain a Camel folder and uid"
-            ));
-        };
+        self.append_cached_from(source, source_conversation_id, destination_folder_id, true)
+    }
+
+    pub(crate) fn append_cached_sent_from(
+        &mut self,
+        source: &mut AccountSession,
+        source_conversation_id: &ConversationId,
+        destination_folder_id: &FolderId,
+    ) -> Result<()> {
+        self.append_cached_from(source, source_conversation_id, destination_folder_id, false)
+    }
+
+    fn append_cached_from(
+        &mut self,
+        source: &mut AccountSession,
+        source_conversation_id: &ConversationId,
+        destination_folder_id: &FolderId,
+        is_draft: bool,
+    ) -> Result<()> {
+        let (source_folder_name, message_uid) = conversation_location(source_conversation_id)?;
         unsafe {
             append_cached_message(
                 source.store,
-                &source_folder_name,
-                &message_uid,
+                source_folder_name,
+                message_uid,
                 self.store,
                 destination_folder_id,
+                is_draft,
             )
         }
     }
@@ -676,28 +846,22 @@ impl AccountSession {
         flag: &str,
         enabled: bool,
     ) -> Result<()> {
-        let Some((folder_name, uid)) = split_conversation_id(&conversation_id.0) else {
-            return Err(anyhow!(
-                "conversation id does not contain a Camel folder and uid"
-            ));
-        };
-        unsafe { set_message_user_flag(self.store, &folder_name, &uid, flag, enabled) }
+        let (folder_name, uid) = conversation_location(conversation_id)?;
+        unsafe { set_message_user_flag(self.store, folder_name, uid, flag, enabled) }
     }
 
     pub(crate) fn get_message_detail(
         &mut self,
         conversation_id: &ConversationId,
     ) -> Result<Option<MessageDetail>> {
-        let Some((folder_name, uid)) = split_conversation_id(&conversation_id.0) else {
-            return Ok(None);
-        };
+        let (folder_name, uid) = conversation_location(conversation_id)?;
         unsafe {
             load_message_detail(
                 self.store,
-                &folder_name,
-                &uid,
+                folder_name,
+                uid,
                 conversation_id,
-                matches!(self.access_mode, CamelAccessMode::Online),
+                self.access_mode.may_load_message(),
             )
         }
     }
@@ -712,6 +876,14 @@ impl AccountSession {
 
     pub(crate) fn set_read(&mut self, conversation_id: &ConversationId, read: bool) -> Result<()> {
         self.set_message_flag(conversation_id, CAMEL_MESSAGE_SEEN, read)
+    }
+
+    pub(crate) fn set_draft(
+        &mut self,
+        conversation_id: &ConversationId,
+        draft: bool,
+    ) -> Result<()> {
+        self.set_message_flag(conversation_id, CAMEL_MESSAGE_DRAFT, draft)
     }
 
     pub(crate) fn set_read_for_sync(
@@ -736,12 +908,8 @@ impl AccountSession {
         flag: c_uint,
         enabled: bool,
     ) -> Result<()> {
-        let Some((folder_name, uid)) = split_conversation_id(&conversation_id.0) else {
-            return Err(anyhow!(
-                "conversation id does not contain a Camel folder and uid"
-            ));
-        };
-        unsafe { set_message_flag_for_sync(self.store, &folder_name, &uid, flag, enabled) }
+        let (folder_name, uid) = conversation_location(conversation_id)?;
+        unsafe { set_message_flag_for_sync(self.store, folder_name, uid, flag, enabled) }
     }
 
     fn set_message_flag(
@@ -750,12 +918,8 @@ impl AccountSession {
         flag: c_uint,
         enabled: bool,
     ) -> Result<()> {
-        let Some((folder_name, uid)) = split_conversation_id(&conversation_id.0) else {
-            return Err(anyhow!(
-                "conversation id does not contain a Camel folder and uid"
-            ));
-        };
-        unsafe { set_message_flag(self.store, &folder_name, &uid, flag, enabled) }
+        let (folder_name, uid) = conversation_location(conversation_id)?;
+        unsafe { set_message_flag(self.store, folder_name, uid, flag, enabled) }
     }
 
     pub(crate) fn move_message(
@@ -763,16 +927,12 @@ impl AccountSession {
         conversation_id: &ConversationId,
         destination_folder_id: &FolderId,
     ) -> Result<()> {
-        let Some((source_folder_name, uid)) = split_conversation_id(&conversation_id.0) else {
-            return Err(anyhow!(
-                "conversation id does not contain a Camel folder and uid"
-            ));
-        };
+        let (source_folder_name, uid) = conversation_location(conversation_id)?;
         unsafe {
             move_message(
                 self.store,
-                &source_folder_name,
-                &uid,
+                source_folder_name,
+                uid,
                 &destination_folder_id.0,
             )
         }
@@ -783,23 +943,18 @@ impl AccountSession {
         conversation_id: &ConversationId,
         attachment_uri: &str,
     ) -> Result<Option<String>> {
-        let Some((folder_name, uid)) = split_conversation_id(&conversation_id.0) else {
-            return Ok(None);
-        };
+        let (folder_name, uid) = conversation_location(conversation_id)?;
         unsafe {
             export_attachment(
                 self.store,
-                self.service,
-                &folder_name,
-                &uid,
+                self.resources.service,
+                folder_name,
+                uid,
                 conversation_id,
                 attachment_uri,
+                self.access_mode.may_load_message(),
             )
         }
-    }
-
-    pub(crate) fn user_cache_root(&self) -> Option<String> {
-        unsafe { service_user_cache_dir(self.service) }
     }
 
     pub(crate) fn refresh_folder_info(&mut self, folder_id: &FolderId) -> Result<()> {
@@ -808,17 +963,9 @@ impl AccountSession {
 
     pub(crate) fn ensure_folder_path(&mut self, folder_id: &FolderId) -> Result<()> {
         for folder_path in local_folder_path_prefixes(&folder_id.0)? {
-            let folder = unsafe {
+            drop(unsafe {
                 get_folder_with_flags(self.store, folder_path, CAMEL_STORE_FOLDER_CREATE)
-            }
-            .map_err(|error| {
-                anyhow!(
-                    "failed to create or open Camel folder '{}': {}",
-                    folder_path,
-                    error
-                )
-            })?;
-            unsafe { glib::gobject_ffi::g_object_unref(folder as *mut _) };
+            }?);
         }
         Ok(())
     }
@@ -831,24 +978,19 @@ impl AccountSession {
         &mut self,
         conversation_id: &ConversationId,
     ) -> Result<()> {
-        let Some((folder_name, uid)) = split_conversation_id(&conversation_id.0) else {
-            return Err(anyhow!(
-                "conversation id does not contain a Camel folder and uid"
-            ));
-        };
-        unsafe { delete_message_permanently(self.store, &folder_name, &uid) }
+        let (folder_name, uid) = conversation_location(conversation_id)?;
+        unsafe { delete_message_permanently(self.store, folder_name, uid) }
     }
 
     pub(crate) fn append_message(
         &mut self,
         request: &AppendMessageRequest<'_>,
-    ) -> Result<Option<StoredMessageRef>> {
+    ) -> Result<StoredMessageRef> {
         unsafe {
             append_message_to_folder(
                 self.store,
                 &self.account_uid,
                 request,
-                matches!(self.access_mode, CamelAccessMode::Online),
             )
         }
     }
@@ -856,20 +998,20 @@ impl AccountSession {
     fn ensure_store(&mut self) -> Result<()> {
         unsafe {
             let is_store = glib::gobject_ffi::g_type_check_instance_is_a(
-                self.service as *mut _,
+                self.resources.service as *mut _,
                 camel_store_get_type(),
             ) != 0;
             if !is_store {
                 #[cfg(debug_assertions)]
                 {
-                    let type_name = object_type_name(self.service as *mut _)
+                    let type_name = object_type_name(self.resources.service as *mut _)
                         .unwrap_or_else(|| "unknown".into());
                     return Err(anyhow!(
                         "Camel service for backend '{}' and account '{}' is not a CamelStore (actual type: {}, service_uid: {})",
                         self.backend_name,
                         self.account_uid,
                         type_name,
-                        self.service_uid,
+                        self.resources.service_uid,
                     ));
                 }
                 #[cfg(not(debug_assertions))]
@@ -882,24 +1024,23 @@ impl AccountSession {
                 }
             }
 
-            self.store = self.service as *mut CamelStore;
+            self.store = self.resources.service as *mut CamelStore;
             Ok(())
         }
     }
 
     fn ensure_connected(&mut self) -> Result<()> {
         unsafe {
-            let status = camel_service_get_connection_status(self.service);
+            let status = camel_service_get_connection_status(self.resources.service);
             if status != CAMEL_SERVICE_CONNECTED {
-                connect_service(self.service).map_err(|error| {
-                    anyhow!(
-                        "Camel connect failed for account '{}' (backend='{}', auth='{}', service_uid='{}'): {}",
+                connect_service(self.resources.service).map_err(|error| {
+                    error.context(format!(
+                        "Camel connect failed for account '{}' (backend='{}', auth='{}', service_uid='{}')",
                         self.account_uid,
                         self.backend_name,
                         self.auth_method,
-                        self.service_uid,
-                        error
-                    )
+                        self.resources.service_uid,
+                    ))
                 })?;
             }
             self.ensure_store_online()
@@ -909,13 +1050,12 @@ impl AccountSession {
     fn ensure_store_online(&mut self) -> Result<()> {
         unsafe {
             ensure_store_online(self.store).map_err(|error| {
-                anyhow!(
-                    "Camel store online setup failed for account '{}' (backend='{}', service_uid='{}'): {}",
+                error.context(format!(
+                    "Camel store online setup failed for account '{}' (backend='{}', service_uid='{}')",
                     self.account_uid,
                     self.backend_name,
-                    self.service_uid,
-                    error
-                )
+                    self.resources.service_uid,
+                ))
             })
         }
     }
@@ -935,73 +1075,37 @@ impl TransportSession {
             .unwrap_or("unknown");
 
         unsafe {
-            let registry = new_registry()?;
-            let account_source = ref_source(registry, account_uid).ok_or_else(|| {
-                anyhow!(
-                    "EDS registry could not resolve transport source {}",
-                    binding.transport_uid
-                )
-            })?;
-            let config_source = find_service_config_source(registry, account_source, backend_name)
-                .ok_or_else(|| {
-                    anyhow!(
-                        "could not find an EDS source with Camel backend extension for transport '{}' and backend '{}'",
-                        account_uid,
-                        backend_name
-                    )
-                })?;
-            if config_source == account_source {
-                glib::gobject_ffi::g_object_ref(config_source as *mut _);
-            }
-            let session = mail_bridge_eds_session_new(registry);
-            if session.is_null() {
-                glib::gobject_ffi::g_object_unref(config_source as *mut _);
-                glib::gobject_ffi::g_object_unref(account_source as *mut _);
-                glib::gobject_ffi::g_object_unref(registry as *mut _);
-                return Err(anyhow!("mail_bridge_eds_session_new returned NULL"));
-            }
-
-            let service_uid = source_uid(config_source)
-                .ok_or_else(|| anyhow!("EDS transport config source has no uid"))?;
-            camel_session_set_online(session, 1);
-            let service = add_service(
-                session,
-                &service_uid,
+            let resources = CamelSessionResources::open(
+                account_uid,
                 backend_name,
+                "transport",
                 CAMEL_PROVIDER_TRANSPORT,
+                true,
             )?;
-            e_source_camel_configure_service(config_source, service);
             let is_transport = glib::gobject_ffi::g_type_check_instance_is_a(
-                service as *mut _,
+                resources.service as *mut _,
                 camel_transport_get_type(),
             ) != 0;
             if !is_transport {
-                teardown_camel_session(service, session, config_source, account_source, registry);
                 return Err(anyhow!(
                     "Camel service for backend '{}' is not a CamelTransport",
                     backend_name
                 ));
             }
-            if let Err(error) = connect_service(service) {
+            if let Err(error) = connect_service(resources.service) {
                 let error = anyhow!(
                     "Camel transport connect failed for account '{}' (backend='{}', auth='{}', service_uid='{}'): {}",
                     account_uid,
                     backend_name,
                     auth_method,
-                    service_uid,
+                    resources.service_uid,
                     error
                 );
-                teardown_camel_session(service, session, config_source, account_source, registry);
                 return Err(error);
             }
-
             Ok(Self {
-                registry,
-                account_source,
-                config_source,
-                session,
-                service,
-                transport: service as *mut CamelTransport,
+                transport: resources.service as *mut CamelTransport,
+                _resources: resources,
             })
         }
     }
@@ -1011,24 +1115,20 @@ impl TransportSession {
         source: &mut AccountSession,
         conversation_id: &ConversationId,
     ) -> Result<bool> {
-        let Some((folder_name, uid)) = split_conversation_id(&conversation_id.0) else {
-            return Err(anyhow!("invalid cached conversation id"));
-        };
-        let folder = unsafe { get_folder(source.store, &folder_name) }
-            .map_err(|error| anyhow!("failed to open Camel folder '{}': {}", folder_name, error))?;
+        let (folder_name, uid) = conversation_location(conversation_id)?;
         let uid = CString::new(uid).map_err(|_| anyhow!("message uid contains interior NUL"))?;
+        let folder = unsafe { get_folder(source.store, folder_name) }?;
         let mut sent_message_saved = 0;
         let mut error = ptr::null_mut();
         let success = unsafe {
             mail_bridge_eds_transport_send_cached_message(
                 self.transport,
-                folder,
+                folder.as_ptr(),
                 uid.as_ptr(),
                 &mut sent_message_saved,
                 &mut error,
             )
         };
-        unsafe { glib::gobject_ffi::g_object_unref(folder as *mut _) };
         if success == 0 {
             return Err(take_gerror(error).unwrap_or_else(|| {
                 anyhow!("mail_bridge_eds_transport_send_cached_message failed")
@@ -1038,35 +1138,9 @@ impl TransportSession {
     }
 }
 
-impl Drop for TransportSession {
-    fn drop(&mut self) {
-        let service = self.service as usize;
-        let session = self.session as usize;
-        let config_source = self.config_source as usize;
-        let account_source = self.account_source as usize;
-        let registry = self.registry as usize;
-        self.service = ptr::null_mut();
-        self.session = ptr::null_mut();
-        self.config_source = ptr::null_mut();
-        self.account_source = ptr::null_mut();
-        self.registry = ptr::null_mut();
-
-        glib::MainContext::default().spawn(async move {
-            unsafe {
-                teardown_camel_session(
-                    service as *mut CamelService,
-                    session as *mut CamelSession,
-                    config_source as *mut ESource,
-                    account_source as *mut ESource,
-                    registry as *mut ESourceRegistry,
-                );
-            }
-        });
-    }
-}
-
 impl Drop for ChangeMonitor {
     fn drop(&mut self) {
+        let session = self.session.take();
         let folders = std::mem::take(&mut self.folders)
             .into_iter()
             .map(|watched| (watched.folder as usize, watched.handler_id))
@@ -1079,6 +1153,7 @@ impl Drop for ChangeMonitor {
                     glib::gobject_ffi::g_object_unref(folder as *mut _);
                 }
             }
+            drop(session);
         });
     }
 }
@@ -1101,140 +1176,94 @@ unsafe fn configure_local_store_path(
         return Ok(());
     }
 
-    let file = unsafe { e_source_local_dup_custom_file(extension) };
-    if file.is_null() {
+    let Some(file) = (unsafe {
+        OwnedGObject::from_ptr(e_source_local_dup_custom_file(extension))
+    }) else {
         return Ok(());
-    }
+    };
 
-    let path = unsafe { g_file_get_path(file) };
-    if path.is_null() {
-        unsafe { glib::gobject_ffi::g_object_unref(file as *mut _) };
+    let Some(path) = (unsafe { OwnedGlibString::from_ptr(g_file_get_path(file.as_ptr())) }) else {
         return Ok(());
-    }
+    };
 
-    let settings = unsafe { camel_service_ref_settings(service) };
-    if !settings.is_null() {
-        unsafe { camel_local_settings_set_path(settings as *mut CamelLocalSettings, path) };
-        unsafe { glib::gobject_ffi::g_object_unref(settings as *mut _) };
-    }
-
-    unsafe { glib::ffi::g_free(path as *mut _) };
-    unsafe { glib::gobject_ffi::g_object_unref(file as *mut _) };
-    Ok(())
-}
-
-pub(crate) fn account_cache_root_for_binding(binding: &EdsAccountBinding) -> Result<String> {
-    let session = AccountSession::open_cached(binding)?;
-    session
-        .user_cache_root()
-        .ok_or_else(|| anyhow!("camel_service_get_user_cache_dir returned NULL"))
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct FolderUri<'a> {
-    source_uid: &'a str,
-    folder_path: &'a str,
-}
-
-impl<'a> FolderUri<'a> {
-    pub(crate) fn parse(uri: &'a str) -> Option<Self> {
-        let (source_uid, folder_path) = uri.strip_prefix("folder://")?.split_once('/')?;
-        (!source_uid.is_empty() && !folder_path.is_empty()).then_some(Self {
-            source_uid,
-            folder_path,
-        })
-    }
-
-    pub(crate) fn parse_local(uri: &'a str) -> Option<Self> {
-        Self::parse(uri).filter(|uri| uri.is_local())
-    }
-
-    pub(crate) fn source_uid(self) -> &'a str {
-        self.source_uid
-    }
-
-    pub(crate) fn folder_path(self) -> &'a str {
-        self.folder_path
-    }
-
-    pub(crate) fn is_local(self) -> bool {
-        self.source_uid == "local"
-    }
-}
-
-pub(crate) fn ensure_local_maildir_folders(folder_uris: &[&str]) -> Result<()> {
-    if folder_uris.is_empty() {
-        return Ok(());
-    }
-
-    let mut session = AccountSession::open_cached_source("local", "maildir")?;
-
-    for folder_uri in folder_uris {
-        let folder = FolderUri::parse_local(folder_uri)
-            .ok_or_else(|| anyhow!("invalid local folder uri: {folder_uri}"))?;
-        session.ensure_folder_path(&FolderId(folder.folder_path().to_string()))?;
+    if let Some(settings) = unsafe {
+        OwnedGObject::from_ptr(camel_service_ref_settings(service))
+    } {
+        unsafe {
+            camel_local_settings_set_path(
+                settings.as_ptr() as *mut CamelLocalSettings,
+                path.as_ptr(),
+            )
+        };
     }
     Ok(())
 }
 
 pub(crate) fn folder_uri(service_uid: &str, folder_id: &FolderId) -> Result<String> {
-    let service_uid =
-        CString::new(service_uid).map_err(|_| anyhow!("service uid contains interior NUL"))?;
-    let folder_name = CString::new(folder_id.0.as_str())
-        .map_err(|_| anyhow!("folder name contains interior NUL"))?;
-    let uid_extra = CString::new(":;@/").expect("static URI allowlist contains no NUL");
-    let name_extra = CString::new("#").expect("static URI allowlist contains no NUL");
-    unsafe {
-        let encoded_uid = camel_url_encode(service_uid.as_ptr(), uid_extra.as_ptr());
-        let encoded_name = camel_url_encode(folder_name.as_ptr(), name_extra.as_ptr());
-        if encoded_uid.is_null() || encoded_name.is_null() {
-            if !encoded_uid.is_null() {
-                glib::ffi::g_free(encoded_uid as glib::ffi::gpointer);
-            }
-            if !encoded_name.is_null() {
-                glib::ffi::g_free(encoded_name as glib::ffi::gpointer);
-            }
-            return Err(anyhow!("camel_url_encode returned NULL"));
-        }
-        let uri = format!(
-            "folder://{}/{}",
-            CStr::from_ptr(encoded_uid).to_string_lossy(),
-            CStr::from_ptr(encoded_name).to_string_lossy(),
-        );
-        glib::ffi::g_free(encoded_uid as glib::ffi::gpointer);
-        glib::ffi::g_free(encoded_name as glib::ffi::gpointer);
-        Ok(uri)
-    }
+    Ok(format!(
+        "folder://{}/{}",
+        encode_folder_uri_component(service_uid, ":;@/", "service uid")?,
+        encode_folder_uri_component(&folder_id.0, "#", "folder name")?,
+    ))
 }
 
-impl Drop for AccountSession {
+fn encode_folder_uri_component(value: &str, allowed: &str, label: &str) -> Result<String> {
+    let value = CString::new(value)
+        .map_err(|_| anyhow!("{} contains interior NUL", label))?;
+    let allowed = CString::new(allowed).expect("static URI allowlist contains no NUL");
+    let encoded = unsafe {
+        OwnedGlibString::from_ptr(camel_url_encode(value.as_ptr(), allowed.as_ptr()))
+    }
+    .ok_or_else(|| anyhow!("camel_url_encode returned NULL"))?;
+    Ok(encoded.to_string_lossy())
+}
+
+impl Drop for CamelSessionResources {
     fn drop(&mut self) {
         // Camel posts service/folder closures to the default GLib context. Destroy the complete
         // object graph on that same context so a worker cannot finalize the store's object bag
         // while the main thread is concurrently releasing one of its folders.
-        let service = self.service as usize;
-        let session = self.session as usize;
-        let config_source = self.config_source as usize;
-        let account_source = self.account_source as usize;
-        let registry = self.registry as usize;
-        self.service = ptr::null_mut();
-        self.session = ptr::null_mut();
-        self.config_source = ptr::null_mut();
-        self.account_source = ptr::null_mut();
-        self.registry = ptr::null_mut();
-
-        glib::MainContext::default().spawn(async move {
-            unsafe {
-                teardown_camel_session(
-                    service as *mut CamelService,
-                    session as *mut CamelSession,
-                    config_source as *mut ESource,
-                    account_source as *mut ESource,
-                    registry as *mut ESourceRegistry,
-                );
-            }
-        });
+        schedule_camel_session_teardown(
+            self.service,
+            self.session,
+            self.config_source,
+            self.account_source,
+            self.registry,
+        );
     }
+}
+
+fn schedule_camel_session_teardown(
+    service: *mut CamelService,
+    session: *mut CamelSession,
+    config_source: *mut ESource,
+    account_source: *mut ESource,
+    registry: *mut ESourceRegistry,
+) {
+    if service.is_null()
+        && session.is_null()
+        && config_source.is_null()
+        && account_source.is_null()
+        && registry.is_null()
+    {
+        return;
+    }
+    let service = service as usize;
+    let session = session as usize;
+    let config_source = config_source as usize;
+    let account_source = account_source as usize;
+    let registry = registry as usize;
+    glib::MainContext::default().spawn(async move {
+        unsafe {
+            teardown_camel_session(
+                service as *mut CamelService,
+                session as *mut CamelSession,
+                config_source as *mut ESource,
+                account_source as *mut ESource,
+                registry as *mut ESourceRegistry,
+            );
+        }
+    });
 }
 
 unsafe fn teardown_camel_session(
@@ -1280,7 +1309,7 @@ unsafe fn ref_source(registry: *mut ESourceRegistry, uid: &str) -> Option<*mut E
     (!source.is_null()).then_some(source)
 }
 
-unsafe fn find_service_config_source(
+unsafe fn ref_service_config_source(
     registry: *mut ESourceRegistry,
     account_source: *mut ESource,
     backend_name: &str,
@@ -1288,19 +1317,21 @@ unsafe fn find_service_config_source(
     let extension_name = backend_extension_name(backend_name)?;
 
     if unsafe { source_has_extension(account_source, &extension_name) } {
+        unsafe { glib::gobject_ffi::g_object_ref(account_source as *mut _) };
         return Some(account_source);
     }
 
     if let Some(parent_uid) = unsafe { source_parent_uid(account_source) } {
-        let parent_source = unsafe { ref_source(registry, &parent_uid) }?;
-        if unsafe { source_has_extension(parent_source, &extension_name) } {
-            return Some(parent_source);
+        let parent_source = unsafe {
+            OwnedGObject::from_ptr(ref_source(registry, &parent_uid)?)
+        }?;
+        if unsafe { source_has_extension(parent_source.as_ptr(), &extension_name) } {
+            return Some(parent_source.into_raw());
         }
-
-        unsafe { glib::gobject_ffi::g_object_unref(parent_source as *mut _) };
     }
 
     if unsafe { source_has_extension(account_source, "Mail Account") } {
+        unsafe { glib::gobject_ffi::g_object_ref(account_source as *mut _) };
         return Some(account_source);
     }
 
@@ -1372,81 +1403,72 @@ unsafe fn load_folder_conversations(
     offset: usize,
     limit: usize,
 ) -> Result<Vec<ConversationSummary>> {
-    let folder = unsafe { get_folder(store, &folder_id.0) }
-        .map_err(|error| anyhow!("failed to open Camel folder '{}': {}", folder_id.0, error))?;
+    let folder = unsafe { get_folder(store, &folder_id.0) }?;
 
-    let result = (|| unsafe {
-        let mut uids = load_folder_uids(folder, &folder_id.0, false)?;
-        let initial_uid_len = if uids.is_null() { 0 } else { (*uids).len };
-        let message_count = camel_folder_get_message_count(folder);
+    unsafe {
+        let mut uids = load_folder_uids(folder.as_ptr(), &folder_id.0, false)?;
+        let initial_uid_len = uids.len();
+        let message_count = camel_folder_get_message_count(folder.as_ptr());
 
         if initial_uid_len == 0 && message_count > 0 {
-            if !uids.is_null() {
-                glib::ffi::g_ptr_array_unref(uids);
-            }
-            uids = load_folder_uids(folder, &folder_id.0, true)?;
+            uids = load_folder_uids(folder.as_ptr(), &folder_id.0, true)?;
         }
 
-        let final_uid_len = if uids.is_null() { 0 } else { (*uids).len };
-        if final_uid_len == 0 {
-            if !uids.is_null() {
-                glib::ffi::g_ptr_array_unref(uids);
-            }
+        if uids.is_empty() {
             return Ok(Vec::new());
         }
 
-        let conversations = collect_conversations(folder, &folder_id.0, uids, offset, limit);
-        glib::ffi::g_ptr_array_unref(uids);
-        conversations
-    })();
-
-    unsafe { glib::gobject_ffi::g_object_unref(folder as *mut _) };
-    result
+        collect_conversations(
+            folder.as_ptr(),
+            &folder_id.0,
+            uids.values()?,
+            offset,
+            limit,
+        )
+    }
 }
 
 unsafe fn load_message_sync_states(
     store: *mut CamelStore,
     folder_id: &FolderId,
 ) -> Result<Vec<MessageSyncState>> {
-    let folder = unsafe { get_folder(store, &folder_id.0) }
-        .map_err(|error| anyhow!("failed to open Camel folder '{}': {}", folder_id.0, error))?;
-    let result = (|| unsafe {
-        let uids = load_folder_uids(folder, &folder_id.0, false)?;
-        let submitted_flag = CString::new(SUBMITTED_USER_FLAG).expect("static flag is valid");
-        let local_sent_flag = CString::new(LOCAL_SENT_USER_FLAG).expect("static flag is valid");
-        let draft_synced_flag = CString::new(DRAFT_SYNCED_USER_FLAG).expect("static flag is valid");
+    let folder = unsafe { get_folder(store, &folder_id.0) }?;
+    unsafe {
+        let uids = load_folder_uids(folder.as_ptr(), &folder_id.0, false)?;
+        let delivery_state_tag =
+            CString::new(DELIVERY_STATE_USER_TAG).expect("static tag is valid");
+        let draft_synced_flag =
+            CString::new(DRAFT_SYNCED_USER_FLAG).expect("static flag is valid");
+        let draft_superseded_flag =
+            CString::new(DRAFT_SUPERSEDED_USER_FLAG).expect("static flag is valid");
         let mut states = Vec::new();
-        for uid_ptr in g_ptr_array_to_vec(uids) {
-            let Some(uid) = cstr_to_string(uid_ptr as *const c_char) else {
-                continue;
-            };
-            let info = camel_folder_get_message_info(folder, uid_ptr as *const c_char);
-            if info.is_null() {
-                continue;
-            }
+        for uid_ptr in uids.values()? {
+            let uid = cstr_to_string(uid_ptr as *const c_char).ok_or_else(|| {
+                anyhow!("Camel returned an invalid message UID in folder '{}'", folder_id.0)
+            })?;
+            let info = get_message_info(folder.as_ptr(), &uid)?;
             states.push(MessageSyncState {
                 conversation_id: ConversationId(format!(
                     "{}{}{}",
                     folder_id.0, CONVERSATION_ID_SEPARATOR, uid
                 )),
-                message_id_hash: camel_message_info_get_message_id(info),
-                submitted: camel_message_info_get_user_flag(info, submitted_flag.as_ptr()) != 0,
-                local_sent_fallback: camel_message_info_get_user_flag(
-                    info,
-                    local_sent_flag.as_ptr(),
+                message_id_hash: camel_message_info_get_message_id(info.as_ptr()),
+                delivery_state: cstr_to_string(camel_message_info_get_user_tag(
+                    info.as_ptr(),
+                    delivery_state_tag.as_ptr(),
+                )),
+                draft_synced: camel_message_info_get_user_flag(
+                    info.as_ptr(),
+                    draft_synced_flag.as_ptr(),
                 ) != 0,
-                draft_synced: camel_message_info_get_user_flag(info, draft_synced_flag.as_ptr())
-                    != 0,
+                draft_superseded: camel_message_info_get_user_flag(
+                    info.as_ptr(),
+                    draft_superseded_flag.as_ptr(),
+                ) != 0,
             });
-            glib::gobject_ffi::g_object_unref(info as *mut _);
-        }
-        if !uids.is_null() {
-            glib::ffi::g_ptr_array_unref(uids);
         }
         Ok(states)
-    })();
-    unsafe { glib::gobject_ffi::g_object_unref(folder as *mut _) };
-    result
+    }
 }
 
 fn search_expression(query: &str, include_body: bool) -> Result<CString> {
@@ -1476,34 +1498,36 @@ unsafe fn search_folder_conversations(
     folder_id: &FolderId,
     expression: &CStr,
 ) -> Result<Vec<ConversationSummary>> {
-    let folder = unsafe { get_folder(store, &folder_id.0) }
-        .map_err(|error| anyhow!("failed to open Camel folder '{}': {}", folder_id.0, error))?;
-    let result = (|| unsafe {
-        let mut uids = ptr::null_mut();
+    let folder = unsafe { get_folder(store, &folder_id.0) }?;
+    unsafe {
+        let mut uid_pointer = ptr::null_mut();
         let mut error = ptr::null_mut();
-        if camel_folder_search_sync(
-            folder,
+        let success = camel_folder_search_sync(
+            folder.as_ptr(),
             expression.as_ptr(),
-            &mut uids,
+            &mut uid_pointer,
             ptr::null_mut(),
             &mut error,
-        ) == 0
-        {
-            if !uids.is_null() {
-                glib::ffi::g_ptr_array_unref(uids);
-            }
+        );
+        let uids = OwnedPtrArray::from_ptr(uid_pointer);
+        if success == 0 {
             return Err(take_gerror(error)
                 .unwrap_or_else(|| anyhow!("camel_folder_search_sync returned FALSE")));
         }
-        if uids.is_null() {
+        let Some(uids) = uids else {
+            return Ok(Vec::new());
+        };
+        if uids.is_empty() {
             return Ok(Vec::new());
         }
-        let matches = collect_conversations(folder, &folder_id.0, uids, 0, 0);
-        glib::ffi::g_ptr_array_unref(uids);
-        matches
-    })();
-    unsafe { glib::gobject_ffi::g_object_unref(folder as *mut _) };
-    result
+        collect_conversations(
+            folder.as_ptr(),
+            &folder_id.0,
+            uids.values()?,
+            0,
+            0,
+        )
+    }
 }
 
 unsafe fn load_message_detail(
@@ -1511,48 +1535,39 @@ unsafe fn load_message_detail(
     folder_name: &str,
     uid: &str,
     conversation_id: &ConversationId,
-    allow_network_fetch: bool,
+    allow_message_load: bool,
 ) -> Result<Option<MessageDetail>> {
-    let folder = unsafe { get_folder(store, folder_name) }
-        .map_err(|error| anyhow!("failed to open Camel folder '{}': {}", folder_name, error))?;
+    let uid_c = CString::new(uid).map_err(|_| anyhow!("message uid contains interior NUL"))?;
+    let folder = unsafe { get_folder(store, folder_name) }?;
 
-    let result = (|| unsafe {
-        let message_info = get_message_info(folder, uid).ok();
-        let mut message = get_cached_message(folder, uid);
-        if message.is_null() && allow_network_fetch {
-            let uid =
-                CString::new(uid).map_err(|_| anyhow!("message uid contains interior NUL"))?;
+    unsafe {
+        let message_info = get_message_info(folder.as_ptr(), uid)?;
+        let mut message = get_cached_message(folder.as_ptr(), &uid_c);
+        if message.is_none() && allow_message_load {
             let mut error = ptr::null_mut();
-            message =
-                camel_folder_get_message_sync(folder, uid.as_ptr(), ptr::null_mut(), &mut error);
-            if message.is_null() {
-                if let Some(info) = message_info {
-                    glib::gobject_ffi::g_object_unref(info as *mut _);
-                }
+            let loaded = camel_folder_get_message_sync(
+                folder.as_ptr(),
+                uid_c.as_ptr(),
+                ptr::null_mut(),
+                &mut error,
+            );
+            let Some(loaded) = OwnedGObject::from_ptr(loaded) else {
                 return Err(take_gerror(error)
                     .unwrap_or_else(|| anyhow!("camel_folder_get_message_sync returned NULL")));
-            }
+            };
+            message = Some(loaded);
         }
-        if message.is_null() {
-            if let Some(info) = message_info {
-                glib::gobject_ffi::g_object_unref(info as *mut _);
-            }
+        let Some(message) = message else {
             return Ok(None);
-        }
-        let detail = build_message_detail(uid, conversation_id, message_info, message);
-
-        if let Some(info) = message_info {
-            glib::gobject_ffi::g_object_unref(info as *mut _);
-        }
-        if !message.is_null() {
-            glib::gobject_ffi::g_object_unref(message as *mut _);
-        }
-
-        Ok(Some(detail))
-    })();
-
-    unsafe { glib::gobject_ffi::g_object_unref(folder as *mut _) };
-    result
+        };
+        build_message_detail(
+            uid,
+            conversation_id,
+            message_info.as_ptr(),
+            message.as_ptr(),
+        )
+        .map(Some)
+    }
 }
 
 unsafe fn set_message_flag(
@@ -1562,56 +1577,42 @@ unsafe fn set_message_flag(
     flag: c_uint,
     enabled: bool,
 ) -> Result<()> {
-    let folder = unsafe { get_folder(store, folder_name) }
-        .map_err(|error| anyhow!("failed to open Camel folder '{}': {}", folder_name, error))?;
-    let result = (|| {
-        let uid = CString::new(uid).map_err(|_| anyhow!("message uid contains interior NUL"))?;
-        let changed = unsafe {
-            let changed = camel_folder_set_message_flags(
-                folder,
-                uid.as_ptr(),
-                flag,
-                if enabled { flag } else { 0 },
-            );
-            let actual = camel_folder_get_message_flags(folder, uid.as_ptr());
-            (changed, actual)
-        };
-        let (changed, actual) = changed;
-        if (actual & flag != 0) != enabled {
-            return Err(anyhow!(
-                "Camel did not persist message flag {flag:#x} as enabled={enabled}"
-            ));
-        }
-        let summary = unsafe { camel_folder_get_folder_summary(folder) };
-        if summary.is_null() {
-            return Err(anyhow!("Camel folder does not expose a summary to save"));
-        }
-        let mut error = ptr::null_mut();
-        if unsafe { camel_folder_summary_save(summary, &mut error) } == 0 {
-            return Err(take_gerror(error)
-                .unwrap_or_else(|| anyhow!("camel_folder_summary_save returned FALSE")));
-        }
-        tracing::debug!(
-            target: "pigeon::eds",
+    let folder = unsafe { get_folder(store, folder_name) }?;
+    let uid = CString::new(uid).map_err(|_| anyhow!("message uid contains interior NUL"))?;
+    let (changed, actual) = unsafe {
+        let changed = camel_folder_set_message_flags(
+            folder.as_ptr(),
+            uid.as_ptr(),
             flag,
-            enabled,
-            changed = changed != 0,
-            provider_dirty = actual & CAMEL_MESSAGE_FOLDER_FLAGGED != 0,
-            "cached message flag"
+            if enabled { flag } else { 0 },
         );
-        development_probe_log!(
-            "cached flag detail: folder={} uid={} flag={:#x} enabled={} changed={} provider_dirty={}",
-            folder_name,
-            uid.to_string_lossy(),
-            flag,
-            enabled,
-            changed != 0,
-            actual & CAMEL_MESSAGE_FOLDER_FLAGGED != 0
-        );
-        Ok(())
-    })();
-    unsafe { glib::gobject_ffi::g_object_unref(folder as *mut _) };
-    result
+        let actual = camel_folder_get_message_flags(folder.as_ptr(), uid.as_ptr());
+        (changed, actual)
+    };
+    if (actual & flag != 0) != enabled {
+        return Err(anyhow!(
+            "Camel did not persist message flag {flag:#x} as enabled={enabled}"
+        ));
+    }
+    unsafe { save_folder_summary(folder.as_ptr()) }?;
+    tracing::debug!(
+        target: "pigeon::eds",
+        flag,
+        enabled,
+        changed = changed != 0,
+        provider_dirty = actual & CAMEL_MESSAGE_FOLDER_FLAGGED != 0,
+        "cached message flag"
+    );
+    development_probe_log!(
+        "cached flag detail: folder={} uid={} flag={:#x} enabled={} changed={} provider_dirty={}",
+        folder_name,
+        uid.to_string_lossy(),
+        flag,
+        enabled,
+        changed != 0,
+        actual & CAMEL_MESSAGE_FOLDER_FLAGGED != 0
+    );
+    Ok(())
 }
 
 unsafe fn set_message_user_flag(
@@ -1621,32 +1622,66 @@ unsafe fn set_message_user_flag(
     flag: &str,
     enabled: bool,
 ) -> Result<()> {
-    let folder = unsafe { get_folder(store, folder_name) }
-        .map_err(|error| anyhow!("failed to open Camel folder '{}': {}", folder_name, error))?;
-    let result = (|| unsafe {
+    let folder = unsafe { get_folder(store, folder_name) }?;
+    unsafe {
         let uid = CString::new(uid).map_err(|_| anyhow!("message uid contains interior NUL"))?;
         let flag = CString::new(flag).map_err(|_| anyhow!("user flag contains interior NUL"))?;
-        let info = camel_folder_get_message_info(folder, uid.as_ptr());
-        if info.is_null() {
-            return Err(anyhow!(
-                "Camel message info is missing while setting a user flag"
-            ));
+        let info = OwnedGObject::from_ptr(camel_folder_get_message_info(
+            folder.as_ptr(),
+            uid.as_ptr(),
+        ))
+        .ok_or_else(|| anyhow!("Camel message info is missing while setting a user flag"))?;
+        camel_message_info_set_user_flag(
+            info.as_ptr(),
+            flag.as_ptr(),
+            if enabled { 1 } else { 0 },
+        );
+        save_folder_summary(folder.as_ptr())
+    }
+}
+
+unsafe fn set_message_user_tag(
+    store: *mut CamelStore,
+    folder_name: &str,
+    uid: &str,
+    name: &str,
+    value: &str,
+) -> Result<()> {
+    let folder = unsafe { get_folder(store, folder_name) }?;
+    unsafe {
+        let uid = CString::new(uid).map_err(|_| anyhow!("message uid contains interior NUL"))?;
+        let name_c =
+            CString::new(name).map_err(|_| anyhow!("user tag name contains interior NUL"))?;
+        let value_c =
+            CString::new(value).map_err(|_| anyhow!("user tag value contains interior NUL"))?;
+        let info = OwnedGObject::from_ptr(camel_folder_get_message_info(
+            folder.as_ptr(),
+            uid.as_ptr(),
+        ))
+        .ok_or_else(|| anyhow!("Camel message info is missing while changing delivery state"))?;
+        camel_message_info_set_user_tag(info.as_ptr(), name_c.as_ptr(), value_c.as_ptr());
+        let stored = cstr_to_string(camel_message_info_get_user_tag(
+            info.as_ptr(),
+            name_c.as_ptr(),
+        ));
+        if stored.as_deref() != Some(value) {
+            return Err(anyhow!("Camel did not persist the message delivery state"));
         }
-        camel_message_info_set_user_flag(info, flag.as_ptr(), if enabled { 1 } else { 0 });
-        glib::gobject_ffi::g_object_unref(info as *mut _);
-        let summary = camel_folder_get_folder_summary(folder);
-        if summary.is_null() {
-            return Err(anyhow!("Camel folder does not expose a summary to save"));
-        }
-        let mut error = ptr::null_mut();
-        if camel_folder_summary_save(summary, &mut error) == 0 {
-            return Err(take_gerror(error)
-                .unwrap_or_else(|| anyhow!("camel_folder_summary_save returned FALSE")));
-        }
-        Ok(())
-    })();
-    unsafe { glib::gobject_ffi::g_object_unref(folder as *mut _) };
-    result
+        save_folder_summary(folder.as_ptr())
+    }
+}
+
+unsafe fn save_folder_summary(folder: *mut CamelFolder) -> Result<()> {
+    let summary = unsafe { camel_folder_get_folder_summary(folder) };
+    if summary.is_null() {
+        return Err(anyhow!("Camel folder does not expose a summary to save"));
+    }
+    let mut error = ptr::null_mut();
+    if unsafe { camel_folder_summary_save(summary, &mut error) } == 0 {
+        return Err(take_gerror(error)
+            .unwrap_or_else(|| anyhow!("camel_folder_summary_save returned FALSE")));
+    }
+    Ok(())
 }
 
 unsafe fn set_message_flag_for_sync(
@@ -1656,50 +1691,47 @@ unsafe fn set_message_flag_for_sync(
     flag: c_uint,
     enabled: bool,
 ) -> Result<()> {
-    let folder = unsafe { get_folder(store, folder_name) }
-        .map_err(|error| anyhow!("failed to open Camel folder '{}': {}", folder_name, error))?;
-    let result = (|| {
-        let uid = CString::new(uid).map_err(|_| anyhow!("message uid contains interior NUL"))?;
-        let changed = unsafe {
-            camel_folder_set_message_flags(
-                folder,
-                uid.as_ptr(),
-                flag,
-                if enabled { flag } else { 0 },
-            )
-        };
-        let info = unsafe { camel_folder_get_message_info(folder, uid.as_ptr()) };
-        if info.is_null() {
-            return Err(anyhow!("Camel message info is missing after setting flags"));
-        }
-        unsafe { camel_message_info_set_folder_flagged(info, 1) };
-        unsafe { glib::gobject_ffi::g_object_unref(info as *mut _) };
-        let actual = unsafe { camel_folder_get_message_flags(folder, uid.as_ptr()) };
-        if (actual & flag != 0) != enabled || actual & CAMEL_MESSAGE_FOLDER_FLAGGED == 0 {
-            return Err(anyhow!(
-                "Camel did not mark the message flag for provider synchronization"
-            ));
-        }
-        tracing::debug!(
-            target: "pigeon::eds",
+    let folder = unsafe { get_folder(store, folder_name) }?;
+    let uid = CString::new(uid).map_err(|_| anyhow!("message uid contains interior NUL"))?;
+    let changed = unsafe {
+        camel_folder_set_message_flags(
+            folder.as_ptr(),
+            uid.as_ptr(),
             flag,
-            enabled,
-            changed = changed != 0,
-            provider_dirty = true,
-            "replayed message flag"
-        );
-        development_probe_log!(
-            "replayed flag detail: folder={} uid={} flag={:#x} enabled={} changed={}",
-            folder_name,
-            uid.to_string_lossy(),
-            flag,
-            enabled,
-            changed != 0
-        );
-        Ok(())
-    })();
-    unsafe { glib::gobject_ffi::g_object_unref(folder as *mut _) };
-    result
+            if enabled { flag } else { 0 },
+        )
+    };
+    let info = unsafe {
+        OwnedGObject::from_ptr(camel_folder_get_message_info(
+            folder.as_ptr(),
+            uid.as_ptr(),
+        ))
+    }
+    .ok_or_else(|| anyhow!("Camel message info is missing after setting flags"))?;
+    unsafe { camel_message_info_set_folder_flagged(info.as_ptr(), 1) };
+    let actual = unsafe { camel_folder_get_message_flags(folder.as_ptr(), uid.as_ptr()) };
+    if (actual & flag != 0) != enabled || actual & CAMEL_MESSAGE_FOLDER_FLAGGED == 0 {
+        return Err(anyhow!(
+            "Camel did not mark the message flag for provider synchronization"
+        ));
+    }
+    tracing::debug!(
+        target: "pigeon::eds",
+        flag,
+        enabled,
+        changed = changed != 0,
+        provider_dirty = true,
+        "replayed message flag"
+    );
+    development_probe_log!(
+        "replayed flag detail: folder={} uid={} flag={:#x} enabled={} changed={}",
+        folder_name,
+        uid.to_string_lossy(),
+        flag,
+        enabled,
+        changed != 0
+    );
+    Ok(())
 }
 
 unsafe fn move_message(
@@ -1708,55 +1740,32 @@ unsafe fn move_message(
     uid: &str,
     destination_folder_name: &str,
 ) -> Result<()> {
-    let source = unsafe { get_folder(store, source_folder_name) }.map_err(|error| {
-        anyhow!(
-            "failed to open Camel source folder '{}': {}",
-            source_folder_name,
-            error
-        )
-    })?;
-    let destination = match unsafe { get_folder(store, destination_folder_name) } {
-        Ok(folder) => folder,
-        Err(error) => {
-            unsafe { glib::gobject_ffi::g_object_unref(source as *mut _) };
-            return Err(anyhow!(
-                "failed to open Camel destination folder '{}': {}",
-                destination_folder_name,
-                error
-            ));
-        }
-    };
+    let source = unsafe { get_folder(store, source_folder_name) }?;
+    let destination = unsafe { get_folder(store, destination_folder_name) }?;
 
-    let result = (|| {
-        let uid = CString::new(uid).map_err(|_| anyhow!("message uid contains interior NUL"))?;
-        let uids = unsafe { glib::ffi::g_ptr_array_new() };
-        unsafe { glib::ffi::g_ptr_array_add(uids, uid.as_ptr() as glib::ffi::gpointer) };
-        let mut error = ptr::null_mut();
-        let success = unsafe {
-            camel_folder_transfer_messages_to_sync(
-                source,
-                uids,
-                destination,
-                1,
-                ptr::null_mut(),
-                ptr::null_mut(),
-                &mut error,
-            )
-        };
-        unsafe { glib::ffi::g_ptr_array_unref(uids) };
-        if success == 0 {
-            return Err(take_gerror(error).unwrap_or_else(|| {
-                anyhow!("camel_folder_transfer_messages_to_sync returned FALSE")
-            }));
-        }
-        Ok(())
-    })();
-
+    let uid = CString::new(uid).map_err(|_| anyhow!("message uid contains interior NUL"))?;
+    let uids = unsafe { OwnedPtrArray::from_ptr(glib::ffi::g_ptr_array_new()) }
+        .ok_or_else(|| anyhow!("g_ptr_array_new returned NULL"))?;
     unsafe {
-        glib::gobject_ffi::g_object_unref(destination as *mut _);
-        glib::gobject_ffi::g_object_unref(source as *mut _);
+        glib::ffi::g_ptr_array_add(uids.as_ptr(), uid.as_ptr() as glib::ffi::gpointer)
+    };
+    let mut error = ptr::null_mut();
+    let success = unsafe {
+        camel_folder_transfer_messages_to_sync(
+            source.as_ptr(),
+            uids.as_ptr(),
+            destination.as_ptr(),
+            1,
+            ptr::null_mut(),
+            ptr::null_mut(),
+            &mut error,
+        )
+    };
+    if success == 0 {
+        return Err(take_gerror(error)
+            .unwrap_or_else(|| anyhow!("camel_folder_transfer_messages_to_sync returned FALSE")));
     }
-    result
+    Ok(())
 }
 
 unsafe fn synchronize_store(store: *mut CamelStore) -> Result<()> {
@@ -1773,30 +1782,27 @@ unsafe fn delete_message_permanently(
     folder_name: &str,
     uid: &str,
 ) -> Result<()> {
-    let folder = unsafe { get_folder(store, folder_name) }
-        .map_err(|error| anyhow!("failed to open Camel folder '{}': {}", folder_name, error))?;
-    let result = (|| unsafe {
+    let folder = unsafe { get_folder(store, folder_name) }?;
+    unsafe {
         let uid = CString::new(uid).map_err(|_| anyhow!("message uid contains interior NUL"))?;
         let changed = camel_folder_set_message_flags(
-            folder,
+            folder.as_ptr(),
             uid.as_ptr(),
             CAMEL_MESSAGE_DELETED | CAMEL_MESSAGE_SEEN,
             CAMEL_MESSAGE_DELETED | CAMEL_MESSAGE_SEEN,
         );
         if changed == 0 {
             return Err(anyhow!(
-                "Camel did not mark the local queued message deleted"
+                "Camel did not mark the message deleted"
             ));
         }
         let mut error = ptr::null_mut();
-        if camel_folder_expunge_sync(folder, ptr::null_mut(), &mut error) == 0 {
+        if camel_folder_expunge_sync(folder.as_ptr(), ptr::null_mut(), &mut error) == 0 {
             return Err(take_gerror(error)
                 .unwrap_or_else(|| anyhow!("camel_folder_expunge_sync returned FALSE")));
         }
         Ok(())
-    })();
-    unsafe { glib::gobject_ffi::g_object_unref(folder as *mut _) };
-    result
+    }
 }
 
 unsafe fn append_cached_message(
@@ -1805,55 +1811,30 @@ unsafe fn append_cached_message(
     message_uid: &str,
     destination_store: *mut CamelStore,
     destination_folder_id: &FolderId,
+    is_draft: bool,
 ) -> Result<()> {
-    let source_folder =
-        unsafe { get_folder(source_store, source_folder_name) }.map_err(|error| {
-            anyhow!(
-                "failed to open cached source folder '{}': {}",
-                source_folder_name,
-                error
-            )
-        })?;
+    let source_folder = unsafe { get_folder(source_store, source_folder_name) }?;
     let destination_folder =
-        match unsafe { get_folder(destination_store, &destination_folder_id.0) } {
-            Ok(folder) => folder,
-            Err(error) => {
-                unsafe { glib::gobject_ffi::g_object_unref(source_folder as *mut _) };
-                return Err(anyhow!(
-                    "failed to open remote draft folder '{}': {}",
-                    destination_folder_id.0,
-                    error
-                ));
-            }
-        };
-    let result = (|| unsafe {
+        unsafe { get_folder(destination_store, &destination_folder_id.0) }?;
+    unsafe {
         let message_uid =
             CString::new(message_uid).map_err(|_| anyhow!("message uid contains interior NUL"))?;
-        let mut appended_uid = ptr::null_mut();
         let mut error = ptr::null_mut();
-        if mail_bridge_eds_append_cached_message(
-            source_folder,
+        let success = mail_bridge_eds_append_cached_message(
+            source_folder.as_ptr(),
             message_uid.as_ptr(),
-            destination_folder,
-            1,
-            &mut appended_uid,
+            destination_folder.as_ptr(),
+            if is_draft { 1 } else { 0 },
+            ptr::null_mut(),
             &mut error,
-        ) == 0
-        {
+        );
+        if success == 0 {
             return Err(take_gerror(error).unwrap_or_else(|| {
                 anyhow!("mail_bridge_eds_append_cached_message returned FALSE")
             }));
         }
-        if !appended_uid.is_null() {
-            glib::ffi::g_free(appended_uid as glib::ffi::gpointer);
-        }
         Ok(())
-    })();
-    unsafe {
-        glib::gobject_ffi::g_object_unref(destination_folder as *mut _);
-        glib::gobject_ffi::g_object_unref(source_folder as *mut _);
     }
-    result
 }
 
 unsafe fn export_attachment(
@@ -1863,64 +1844,70 @@ unsafe fn export_attachment(
     uid: &str,
     conversation_id: &ConversationId,
     attachment_uri: &str,
+    allow_message_load: bool,
 ) -> Result<Option<String>> {
-    let folder = unsafe { get_folder(store, folder_name) }
-        .map_err(|error| anyhow!("failed to open Camel folder '{}': {}", folder_name, error))?;
+    let uid_c = CString::new(uid).map_err(|_| anyhow!("message uid contains interior NUL"))?;
+    let cache_root = unsafe { service_user_cache_dir(service) }
+        .ok_or_else(|| anyhow!("camel_service_get_user_cache_dir returned NULL"))?;
+    let cache_root =
+        CString::new(cache_root).map_err(|_| anyhow!("cache root contains interior NUL"))?;
+    let cache_key = CString::new(conversation_id.0.as_str())
+        .map_err(|_| anyhow!("conversation id contains interior NUL"))?;
+    let attachment_uri = CString::new(attachment_uri)
+        .map_err(|_| anyhow!("attachment uri contains interior NUL"))?;
+    let folder = unsafe { get_folder(store, folder_name) }?;
 
-    let result = (|| unsafe {
-        let message = get_cached_message(folder, uid);
-        if message.is_null() {
+    unsafe {
+        let mut message = get_cached_message(folder.as_ptr(), &uid_c);
+        if message.is_none() && allow_message_load {
+            let mut error = ptr::null_mut();
+            let loaded = camel_folder_get_message_sync(
+                folder.as_ptr(),
+                uid_c.as_ptr(),
+                ptr::null_mut(),
+                &mut error,
+            );
+            let Some(loaded) = OwnedGObject::from_ptr(loaded) else {
+                return Err(take_gerror(error)
+                    .unwrap_or_else(|| anyhow!("camel_folder_get_message_sync returned NULL")));
+            };
+            message = Some(loaded);
+        }
+        let Some(message) = message else {
             return Ok(None);
-        }
+        };
 
-        let cache_root = service_user_cache_dir(service)
-            .ok_or_else(|| anyhow!("camel_service_get_user_cache_dir returned NULL"))?;
-        let cache_root =
-            CString::new(cache_root).map_err(|_| anyhow!("cache root contains interior NUL"))?;
-        let cache_key = CString::new(conversation_id.0.as_str())
-            .map_err(|_| anyhow!("conversation id contains interior NUL"))?;
-        let attachment_uri = CString::new(attachment_uri)
-            .map_err(|_| anyhow!("attachment uri contains interior NUL"))?;
         let mut error = ptr::null_mut();
-        let exported_uri = mail_bridge_eds_extract_attachment_to_file(
-            message,
-            cache_root.as_ptr(),
-            cache_key.as_ptr(),
-            attachment_uri.as_ptr(),
-            &mut error,
-        );
-        glib::gobject_ffi::g_object_unref(message as *mut _);
-
-        if exported_uri.is_null() {
-            return Err(take_gerror(error).unwrap_or_else(|| {
+        let exported_uri = OwnedGlibString::from_ptr(
+            mail_bridge_eds_extract_attachment_to_file(
+                message.as_ptr(),
+                cache_root.as_ptr(),
+                cache_key.as_ptr(),
+                attachment_uri.as_ptr(),
+                &mut error,
+            ),
+        )
+        .ok_or_else(|| {
+            take_gerror(error).unwrap_or_else(|| {
                 anyhow!("mail_bridge_eds_extract_attachment_to_file returned NULL")
-            }));
-        }
-
-        let uri = cstr_to_string(exported_uri).unwrap_or_default();
-        glib::ffi::g_free(exported_uri as glib::ffi::gpointer);
+            })
+        })?;
+        let uri = exported_uri.to_string_lossy();
+        let uri = (!uri.is_empty()).then_some(uri).ok_or_else(|| {
+            anyhow!("mail_bridge_eds_extract_attachment_to_file returned an empty URI")
+        })?;
         Ok(Some(uri))
-    })();
-
-    unsafe { glib::gobject_ffi::g_object_unref(folder as *mut _) };
-    result
+    }
 }
 
 unsafe fn append_message_to_folder(
     store: *mut CamelStore,
     source_uid: &str,
     request: &AppendMessageRequest<'_>,
-    allow_network_fetch: bool,
-) -> Result<Option<StoredMessageRef>> {
-    let folder = unsafe { get_folder(store, &request.folder_id.0) }.map_err(|error| {
-        anyhow!(
-            "failed to open Camel folder '{}': {}",
-            request.folder_id.0,
-            error
-        )
-    })?;
+) -> Result<StoredMessageRef> {
+    let folder = unsafe { get_folder(store, &request.folder_id.0) }?;
 
-    let result = (|| unsafe {
+    unsafe {
         let source_uid_c =
             CString::new(source_uid).map_err(|_| anyhow!("source uid contains interior NUL"))?;
         let message_id = request
@@ -1945,10 +1932,11 @@ unsafe fn append_message_to_folder(
             .map_err(|_| anyhow!("plain body contains interior NUL"))?;
         let attachment_uris = serialize_attachment_uris(request.attachment_uris)?;
         let mut appended_uid = ptr::null_mut();
+        let mut stored_message_id = ptr::null_mut();
         let mut error = ptr::null_mut();
 
         let ok = mail_bridge_eds_append_text_message(
-            folder,
+            folder.as_ptr(),
             source_uid_c.as_ptr(),
             message_id
                 .as_ref()
@@ -1966,54 +1954,50 @@ unsafe fn append_message_to_folder(
             attachment_uris.as_ptr(),
             if request.is_draft { 1 } else { 0 },
             &mut appended_uid,
+            &mut stored_message_id,
             &mut error,
         );
+        let appended_uid = OwnedGlibString::from_ptr(appended_uid);
+        let stored_message_id = OwnedGlibString::from_ptr(stored_message_id);
         if ok == 0 {
             return Err(take_gerror(error)
                 .unwrap_or_else(|| anyhow!("mail_bridge_eds_append_text_message failed")));
         }
 
-        let appended_uid_ptr = appended_uid;
-        let appended_uid = cstr_to_string(appended_uid_ptr).unwrap_or_default();
-        if !appended_uid_ptr.is_null() {
-            glib::ffi::g_free(appended_uid_ptr as glib::ffi::gpointer);
-        }
+        let appended_uid = appended_uid
+            .as_ref()
+            .map_or_else(String::new, OwnedGlibString::to_string_lossy);
+        let message_id = stored_message_id
+            .as_ref()
+            .map_or_else(String::new, OwnedGlibString::to_string_lossy);
 
-        if appended_uid.is_empty() {
-            return Ok(None);
-        }
+        anyhow::ensure!(!appended_uid.is_empty(), "Camel local append returned no message UID");
+        anyhow::ensure!(!message_id.is_empty(), "Camel local append returned no Message-ID");
 
         let conversation_id = ConversationId(format!(
             "{}{}{}",
             request.folder_id.0, CONVERSATION_ID_SEPARATOR, appended_uid
         ));
-        // Appends currently target the built-in local Maildir. Its provider does not implement
-        // get_message_cached(), but get_message_sync() reads the just-written local MIME without
-        // performing network I/O.
-        load_message_detail(
-            store,
-            &request.folder_id.0,
-            &appended_uid,
-            &conversation_id,
-            allow_network_fetch || source_uid_c.to_bytes() == b"local",
-        )
-        .map(|detail| detail.as_ref().map(StoredMessageRef::from))
-    })();
-
-    unsafe { glib::gobject_ffi::g_object_unref(folder as *mut _) };
-    result
+        Ok(StoredMessageRef {
+            conversation_id,
+            message_id: MessageId(message_id),
+        })
+    }
 }
 
 fn serialize_recipients(values: &[String]) -> Result<CString> {
-    let serialized = values
-        .iter()
-        .filter_map(|value| {
-            let trimmed = value.trim();
-            (!trimmed.is_empty()).then_some(trimmed)
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
-    CString::new(serialized).map_err(|_| anyhow!("recipient contains interior NUL"))
+    let mut serialized = Vec::with_capacity(values.len());
+    for value in values {
+        let value = value.trim();
+        if value.is_empty() {
+            continue;
+        }
+        if value.contains('\r') || value.contains('\n') {
+            return Err(anyhow!("recipient contains a line break"));
+        }
+        serialized.push(value);
+    }
+    CString::new(serialized.join("\n")).map_err(|_| anyhow!("recipient contains interior NUL"))
 }
 
 fn serialize_attachment_uris(values: &[String]) -> Result<CString> {
@@ -2032,28 +2016,24 @@ fn serialize_attachment_uris(values: &[String]) -> Result<CString> {
 }
 
 unsafe fn refresh_folder_info(store: *mut CamelStore, folder_name: &str) -> Result<()> {
-    let folder = unsafe { get_folder(store, folder_name) }
-        .map_err(|error| anyhow!("failed to open Camel folder '{}': {}", folder_name, error))?;
+    let folder = unsafe { get_folder(store, folder_name) }?;
 
-    let result = (|| unsafe {
+    unsafe {
         let mut error = ptr::null_mut();
-        let ok = camel_folder_refresh_info_sync(folder, ptr::null_mut(), &mut error);
+        let ok = camel_folder_refresh_info_sync(folder.as_ptr(), ptr::null_mut(), &mut error);
         if ok == 0 {
             return Err(take_gerror(error)
                 .unwrap_or_else(|| anyhow!("camel_folder_refresh_info_sync failed")));
         }
         Ok(())
-    })();
-
-    unsafe { glib::gobject_ffi::g_object_unref(folder as *mut _) };
-    result
+    }
 }
 
 unsafe fn load_folder_uids(
     folder: *mut CamelFolder,
     folder_name: &str,
     refresh_if_needed: bool,
-) -> Result<*mut glib::ffi::GPtrArray> {
+) -> Result<OwnedPtrArray> {
     let summary = unsafe { camel_folder_get_folder_summary(folder) };
     if summary.is_null() {
         return Err(anyhow!(
@@ -2082,7 +2062,8 @@ unsafe fn load_folder_uids(
             .unwrap_or_else(|| anyhow!("camel_folder_summary_prepare_fetch_all failed")));
     }
 
-    Ok(unsafe { camel_folder_dup_uids(folder) })
+    unsafe { OwnedPtrArray::from_ptr(camel_folder_dup_uids(folder)) }
+        .ok_or_else(|| anyhow!("camel_folder_dup_uids returned NULL for '{folder_name}'"))
 }
 
 unsafe fn ensure_store_online(store: *mut CamelStore) -> Result<()> {
@@ -2139,7 +2120,10 @@ unsafe fn ensure_store_offline(store: *mut CamelStore) -> Result<()> {
     Ok(())
 }
 
-unsafe fn get_folder(store: *mut CamelStore, folder_name: &str) -> Result<*mut CamelFolder> {
+unsafe fn get_folder(
+    store: *mut CamelStore,
+    folder_name: &str,
+) -> Result<OwnedGObject<CamelFolder>> {
     unsafe { get_folder_with_flags(store, folder_name, 0) }
 }
 
@@ -2147,57 +2131,46 @@ unsafe fn get_folder_with_flags(
     store: *mut CamelStore,
     folder_name: &str,
     flags: c_uint,
-) -> Result<*mut CamelFolder> {
-    let folder_name =
+) -> Result<OwnedGObject<CamelFolder>> {
+    let folder_name_c =
         CString::new(folder_name).map_err(|_| anyhow!("folder name contains interior NUL"))?;
     let mut error = ptr::null_mut();
     let folder = unsafe {
         camel_store_get_folder_sync(
             store,
-            folder_name.as_ptr(),
+            folder_name_c.as_ptr(),
             flags,
             ptr::null_mut(),
             &mut error,
         )
     };
-    if folder.is_null() {
-        return Err(take_gerror(error)
-            .unwrap_or_else(|| anyhow!("camel_store_get_folder_sync returned NULL")));
-    }
-    Ok(folder)
+    unsafe { OwnedGObject::from_ptr(folder) }.ok_or_else(|| {
+        take_gerror(error)
+            .unwrap_or_else(|| anyhow!("camel_store_get_folder_sync returned NULL"))
+            .context(format!("failed to open Camel folder '{folder_name}'"))
+    })
 }
 
 unsafe fn collect_conversations(
     folder: *mut CamelFolder,
     folder_name: &str,
-    uids: *mut glib::ffi::GPtrArray,
+    uid_values: Vec<glib::ffi::gpointer>,
     offset: usize,
     limit: usize,
 ) -> Result<Vec<ConversationSummary>> {
-    let uid_values = unsafe { g_ptr_array_to_vec(uids) };
     let mut conversations = Vec::with_capacity(uid_values.len());
 
     for uid_ptr in uid_values {
-        let Some(uid) = cstr_to_string(uid_ptr as *const c_char) else {
-            continue;
-        };
-        let message_info = match unsafe { get_message_info(folder, &uid) } {
-            Ok(info) => info,
-            Err(_) => continue,
-        };
-        let summary = unsafe { conversation_from_message_info(message_info, folder_name) };
-        unsafe { glib::gobject_ffi::g_object_unref(message_info as *mut _) };
-        if let Some(summary) = summary {
-            conversations.push(summary);
-        }
+        let uid = cstr_to_string(uid_ptr as *const c_char).ok_or_else(|| {
+            anyhow!("Camel returned an invalid message UID in folder '{folder_name}'")
+        })?;
+        let message_info = unsafe { get_message_info(folder, &uid) }?;
+        conversations.push(unsafe {
+            conversation_from_message_info(message_info.as_ptr(), folder_name, &uid)
+        });
     }
 
-    conversations.sort_by(|left, right| {
-        right
-            .last_updated_unix_ms
-            .cmp(&left.last_updated_unix_ms)
-            .then_with(|| left.subject.cmp(&right.subject))
-    });
+    sort_conversations(&mut conversations);
     if offset >= conversations.len() {
         return Ok(Vec::new());
     }
@@ -2213,28 +2186,34 @@ unsafe fn collect_conversations(
         .collect())
 }
 
-unsafe fn get_message_info(folder: *mut CamelFolder, uid: &str) -> Result<*mut CamelMessageInfo> {
+unsafe fn get_message_info(
+    folder: *mut CamelFolder,
+    uid: &str,
+) -> Result<OwnedGObject<CamelMessageInfo>> {
     let uid = CString::new(uid).map_err(|_| anyhow!("message uid contains interior NUL"))?;
     let info = unsafe { camel_folder_get_message_info(folder, uid.as_ptr()) };
-    if info.is_null() {
-        return Err(anyhow!("camel_folder_get_message_info returned NULL"));
-    }
-    Ok(info)
+    unsafe { OwnedGObject::from_ptr(info) }
+        .ok_or_else(|| anyhow!("camel_folder_get_message_info returned NULL"))
 }
 
-unsafe fn get_cached_message(folder: *mut CamelFolder, uid: &str) -> *mut CamelMimeMessage {
-    let uid = match CString::new(uid) {
-        Ok(uid) => uid,
-        Err(_) => return ptr::null_mut(),
-    };
-    unsafe { camel_folder_get_message_cached(folder, uid.as_ptr(), ptr::null_mut()) }
+unsafe fn get_cached_message(
+    folder: *mut CamelFolder,
+    uid: &CStr,
+) -> Option<OwnedGObject<CamelMimeMessage>> {
+    unsafe {
+        OwnedGObject::from_ptr(camel_folder_get_message_cached(
+            folder,
+            uid.as_ptr(),
+            ptr::null_mut(),
+        ))
+    }
 }
 
 unsafe fn conversation_from_message_info(
     info: *mut CamelMessageInfo,
     folder_name: &str,
-) -> Option<ConversationSummary> {
-    let uid = cstr_to_string(unsafe { camel_message_info_get_uid(info) })?;
+    uid: &str,
+) -> ConversationSummary {
     let flags = unsafe { camel_message_info_get_flags(info) };
     let subject = cstr_to_string(unsafe { camel_message_info_get_subject(info) })
         .filter(|value| !value.trim().is_empty())
@@ -2250,8 +2229,9 @@ unsafe fn conversation_from_message_info(
     let received = unsafe { camel_message_info_get_date_received(info) };
     let timestamp_secs = if sent > 0 { sent } else { received.max(0) };
 
-    Some(ConversationSummary {
+    ConversationSummary {
         id: ConversationId(compose_conversation_id(folder_name, &uid)),
+        folder_id: FolderId(folder_name.into()),
         subject,
         participants: vec![compact_participant(&from)],
         message_count: 1,
@@ -2268,23 +2248,20 @@ unsafe fn conversation_from_message_info(
         starred: flags & CAMEL_MESSAGE_FLAGGED != 0,
         last_updated_unix_ms: timestamp_secs.saturating_mul(1000),
         preview,
-    })
+    }
 }
 
 unsafe fn build_message_detail(
     uid: &str,
     conversation_id: &ConversationId,
-    message_info: Option<*mut CamelMessageInfo>,
+    message_info: *mut CamelMessageInfo,
     message: *mut CamelMimeMessage,
-) -> MessageDetail {
+) -> Result<MessageDetail> {
     debug_assert!(!message.is_null());
-    let info_flags = message_info
-        .map(|info| unsafe { camel_message_info_get_flags(info) })
-        .unwrap_or(0);
-    let info_subject = message_info
-        .and_then(|info| cstr_to_string(unsafe { camel_message_info_get_subject(info) }));
-    let info_from =
-        message_info.and_then(|info| cstr_to_string(unsafe { camel_message_info_get_from(info) }));
+    debug_assert!(!message_info.is_null());
+    let info_flags = unsafe { camel_message_info_get_flags(message_info) };
+    let info_subject = cstr_to_string(unsafe { camel_message_info_get_subject(message_info) });
+    let info_from = cstr_to_string(unsafe { camel_message_info_get_from(message_info) });
     let subject = cstr_to_string(unsafe { camel_mime_message_get_subject(message) })
         .filter(|value| !value.trim().is_empty())
         .or(info_subject)
@@ -2316,7 +2293,7 @@ unsafe fn build_message_detail(
     let (body_html, body_text) = unsafe { extract_message_bodies(message) };
     let body_html = body_html.unwrap_or_default();
     let body_text = body_text.unwrap_or_default();
-    let attachments = unsafe { extract_message_attachments(message) };
+    let attachments = unsafe { extract_message_attachments(message) }?;
     let mut offset = 0;
     let date_sent = unsafe { camel_mime_message_get_date(message, &mut offset) };
     let date_received = unsafe { camel_mime_message_get_date_received(message, &mut offset) };
@@ -2337,7 +2314,7 @@ unsafe fn build_message_detail(
         attachments.len()
     );
 
-    MessageDetail {
+    Ok(MessageDetail {
         message_id: MessageId(message_id),
         conversation_id: conversation_id.clone(),
         subject,
@@ -2351,7 +2328,7 @@ unsafe fn build_message_detail(
         unread: (info_flags & CAMEL_MESSAGE_SEEN) == 0,
         attachments,
         body: MessageBody::from_parts(body_html, body_text),
-    }
+    })
 }
 
 unsafe fn load_folder_tree(store: *mut CamelStore) -> Result<Vec<MailFolder>> {
@@ -2367,32 +2344,32 @@ unsafe fn load_folder_tree(store: *mut CamelStore) -> Result<Vec<MailFolder>> {
             &mut error,
         )
     };
-    if info.is_null() {
-        return Err(take_gerror(error)
-            .unwrap_or_else(|| anyhow!("camel_store_get_folder_info_sync returned NULL")));
-    }
+    let info = unsafe { OwnedFolderInfo::from_ptr(info) }.ok_or_else(|| {
+        take_gerror(error)
+            .unwrap_or_else(|| anyhow!("camel_store_get_folder_info_sync returned NULL"))
+    })?;
 
     let mut folders = Vec::new();
-    collect_folder_info(info, &mut folders);
-    unsafe { camel_folder_info_free(info) };
+    collect_folder_info(info.as_ptr(), &mut folders)?;
 
     folders.sort_by(compare_folders);
     folders.dedup_by(|left, right| left.id == right.id);
     Ok(folders)
 }
 
-fn collect_folder_info(info: *mut CamelFolderInfo, folders: &mut Vec<MailFolder>) {
+fn collect_folder_info(
+    info: *mut CamelFolderInfo,
+    folders: &mut Vec<MailFolder>,
+) -> Result<()> {
     let mut cursor = info;
     while !cursor.is_null() {
-        let full_name = unsafe { cstr_to_string((*cursor).full_name) };
+        let full_name = unsafe { cstr_to_string((*cursor).full_name) }
+            .filter(|name| !name.is_empty())
+            .ok_or_else(|| anyhow!("Camel folder info has no full name"))?;
         let display_name = unsafe { cstr_to_string((*cursor).display_name) };
-        let folder_id = full_name
-            .clone()
-            .or_else(|| display_name.clone())
-            .unwrap_or_else(|| "unknown".into());
-        let folder_name = display_name.clone().unwrap_or_else(|| folder_id.clone());
+        let folder_name = display_name.unwrap_or_else(|| full_name.clone());
         folders.push(MailFolder {
-            id: FolderId(folder_id.clone()),
+            id: FolderId(full_name),
             name: folder_name,
             unread_count: unsafe { (*cursor).unread.max(0) as u32 },
             kind: classify_folder_kind(unsafe { (*cursor).flags }),
@@ -2400,10 +2377,11 @@ fn collect_folder_info(info: *mut CamelFolderInfo, folders: &mut Vec<MailFolder>
 
         let child = unsafe { (*cursor).child };
         if !child.is_null() {
-            collect_folder_info(child, folders);
+            collect_folder_info(child, folders)?;
         }
         cursor = unsafe { (*cursor).next };
     }
+    Ok(())
 }
 
 fn classify_folder_kind(flags: c_uint) -> FolderKind {
@@ -2442,12 +2420,14 @@ fn compose_conversation_id(folder_name: &str, uid: &str) -> String {
     format!("{folder_name}{CONVERSATION_ID_SEPARATOR}{uid}")
 }
 
-fn split_conversation_id(value: &str) -> Option<(String, String)> {
+pub(crate) fn conversation_id_parts(value: &str) -> Option<(&str, &str)> {
     let (folder_name, uid) = value.split_once(CONVERSATION_ID_SEPARATOR)?;
-    if folder_name.is_empty() || uid.is_empty() {
-        return None;
-    }
-    Some((folder_name.to_string(), uid.to_string()))
+    (!folder_name.is_empty() && !uid.is_empty()).then_some((folder_name, uid))
+}
+
+fn conversation_location(conversation_id: &ConversationId) -> Result<(&str, &str)> {
+    conversation_id_parts(&conversation_id.0)
+        .ok_or_else(|| anyhow!("conversation id does not contain a Camel folder and uid"))
 }
 
 fn compact_participant(value: &str) -> String {
@@ -2461,13 +2441,6 @@ fn compact_participant(value: &str) -> String {
     trimmed.to_string()
 }
 
-unsafe fn g_ptr_array_to_vec(array: *mut glib::ffi::GPtrArray) -> Vec<glib::ffi::gpointer> {
-    if array.is_null() || unsafe { (*array).pdata }.is_null() || unsafe { (*array).len } == 0 {
-        return Vec::new();
-    }
-    unsafe { std::slice::from_raw_parts((*array).pdata, (*array).len as usize).to_vec() }
-}
-
 fn cstr_to_string(value: *const c_char) -> Option<String> {
     if value.is_null() {
         return None;
@@ -2477,6 +2450,32 @@ fn cstr_to_string(value: *const c_char) -> Option<String> {
             .to_string_lossy()
             .into_owned(),
     )
+}
+
+/// Uses the same MIME address decoder as ESourceMailIdentity's alias-set API.
+pub(super) fn decode_addresses(raw: &str) -> Result<Vec<(String, Option<String>)>> {
+    let raw = CString::new(raw).map_err(|_| anyhow!("address list contains interior NUL"))?;
+    let addresses = unsafe { camel_internet_address_new() };
+    let owner: glib::Object = unsafe {
+        glib::translate::from_glib_full(addresses as *mut glib::gobject_ffi::GObject)
+    };
+    let count = unsafe { camel_address_decode(addresses.cast(), raw.as_ptr()) };
+    let mut result = Vec::new();
+    for index in 0..count {
+        let mut name = ptr::null();
+        let mut address = ptr::null();
+        if unsafe { camel_internet_address_get(addresses, index, &mut name, &mut address) } == 0 {
+            continue;
+        }
+        if let Some(address) = cstr_to_string(address).filter(|address| !address.is_empty()) {
+            result.push((
+                address,
+                cstr_to_string(name).filter(|name| !name.trim().is_empty()),
+            ));
+        }
+    }
+    drop(owner);
+    Ok(result)
 }
 
 unsafe fn first_address_string(addresses: *mut CamelInternetAddress) -> Option<String> {
@@ -2526,39 +2525,55 @@ unsafe fn extract_message_bodies(
 
     let ok =
         unsafe { mail_bridge_eds_extract_message_bodies(message, &mut html_ptr, &mut plain_ptr) };
+    let html = unsafe { OwnedGlibString::from_ptr(html_ptr) };
+    let plain = unsafe { OwnedGlibString::from_ptr(plain_ptr) };
     if ok == 0 {
         return (None, None);
     }
 
-    let html = cstr_to_string(html_ptr);
-    let plain = cstr_to_string(plain_ptr);
-
-    if !html_ptr.is_null() {
-        unsafe { glib::ffi::g_free(html_ptr as glib::ffi::gpointer) };
-    }
-    if !plain_ptr.is_null() {
-        unsafe { glib::ffi::g_free(plain_ptr as glib::ffi::gpointer) };
-    }
-
-    (html, plain)
+    (
+        html.as_ref().map(OwnedGlibString::to_string_lossy),
+        plain.as_ref().map(OwnedGlibString::to_string_lossy),
+    )
 }
 
-unsafe fn extract_message_attachments(message: *mut CamelMimeMessage) -> Vec<AttachmentInfo> {
-    let serialized_ptr = unsafe { mail_bridge_eds_extract_message_attachments(message) };
-    if serialized_ptr.is_null() {
-        return Vec::new();
+unsafe fn extract_message_attachments(
+    message: *mut CamelMimeMessage,
+) -> Result<Vec<AttachmentInfo>> {
+    let Some(serialized) = (unsafe {
+        OwnedGlibString::from_ptr(mail_bridge_eds_extract_message_attachments(message))
+    }) else {
+        return Ok(Vec::new());
+    };
+    let serialized = unsafe { CStr::from_ptr(serialized.as_ptr()) }
+        .to_str()
+        .map_err(|_| anyhow!("attachment records are not UTF-8"))?;
+
+    parse_attachment_records(serialized)
+}
+
+fn parse_attachment_records(serialized: &str) -> Result<Vec<AttachmentInfo>> {
+    if serialized.is_empty() {
+        return Err(anyhow!("attachment records are empty"));
     }
-
-    let serialized = cstr_to_string(serialized_ptr).unwrap_or_default();
-    unsafe { glib::ffi::g_free(serialized_ptr as glib::ffi::gpointer) };
-
     serialized
         .lines()
-        .filter_map(|line| {
-            let (display_name, uri) = line.split_once('\t')?;
-            Some(AttachmentInfo {
-                display_name: display_name.to_string(),
-                uri: uri.to_string(),
+        .map(|line| {
+            let (display_name, token) = line
+                .split_once('\t')
+                .ok_or_else(|| anyhow!("attachment record has no token separator"))?;
+            let display_name = percent_decode_str(display_name)
+                .decode_utf8()
+                .map_err(|_| anyhow!("attachment display name is not UTF-8"))?;
+            let index = token
+                .parse::<u32>()
+                .map_err(|_| anyhow!("attachment record has an invalid token"))?;
+            if display_name.is_empty() || index == 0 {
+                return Err(anyhow!("attachment record is incomplete"));
+            }
+            Ok(AttachmentInfo {
+                display_name: display_name.into_owned(),
+                location: AttachmentLocation::CachedToken(token.to_string()),
             })
         })
         .collect()
@@ -2607,17 +2622,6 @@ unsafe fn object_type_name(instance: *mut glib::gobject_ffi::GTypeInstance) -> O
     cstr_to_string(unsafe { glib::gobject_ffi::g_type_name(gtype) })
 }
 
-fn take_gerror(error: *mut glib::ffi::GError) -> Option<anyhow::Error> {
-    if error.is_null() {
-        return None;
-    }
-
-    let message =
-        cstr_to_string(unsafe { (*error).message }).unwrap_or_else(|| "unknown GLib error".into());
-    unsafe { glib::ffi::g_error_free(error) };
-    Some(anyhow!(message))
-}
-
 fn local_folder_path_prefixes(folder_path: &str) -> Result<Vec<&str>> {
     if folder_path.is_empty()
         || folder_path.starts_with('/')
@@ -2639,30 +2643,9 @@ fn local_folder_path_prefixes(folder_path: &str) -> Result<Vec<&str>> {
 #[cfg(test)]
 mod tests {
     use super::{
-        FolderUri, local_folder_path_prefixes, search_expression, serialize_attachment_uris,
+        local_folder_path_prefixes, parse_attachment_records, search_expression,
+        serialize_attachment_uris, serialize_recipients,
     };
-
-    #[test]
-    fn folder_uri_parsing_owns_the_source_and_path_invariant() {
-        let uri = FolderUri::parse("folder://local/account-1/Drafts").unwrap();
-        assert!(uri.is_local());
-        assert_eq!(uri.source_uid(), "local");
-        assert_eq!(uri.folder_path(), "account-1/Drafts");
-        assert!(FolderUri::parse("folder://provider/Inbox").is_some());
-        assert!(FolderUri::parse_local("folder://provider/Inbox").is_none());
-
-        for malformed in [
-            "local/account-1/Drafts",
-            "folder:///account-1/Drafts",
-            "folder://local/",
-            "folder://local",
-        ] {
-            assert!(
-                FolderUri::parse(malformed).is_none(),
-                "accepted {malformed:?}"
-            );
-        }
-    }
 
     #[test]
     fn nested_local_folder_creation_includes_each_parent() {
@@ -2719,6 +2702,38 @@ mod tests {
     fn attachment_uri_line_breaks_cannot_corrupt_the_wire_format() {
         assert!(serialize_attachment_uris(&["file:///tmp/a\nb".into()]).is_err());
         assert!(serialize_attachment_uris(&["file:///tmp/a\rb".into()]).is_err());
+    }
+
+    #[test]
+    fn recipient_line_breaks_cannot_create_extra_address_records() {
+        assert!(
+            serialize_recipients(&["person@example.com\nBcc: hidden@example.com".into()])
+                .is_err()
+        );
+        assert!(
+            serialize_recipients(&["person@example.com\rhidden@example.com".into()]).is_err()
+        );
+    }
+
+    #[test]
+    fn attachment_records_preserve_delimiters_and_duplicate_display_names() {
+        let records = parse_attachment_records(
+            "same%09name%0A100%25.txt\t1\nsame%09name%0A100%25.txt\t2",
+        )
+        .unwrap();
+
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].display_name, "same\tname\n100%.txt");
+        assert_eq!(records[1].display_name, records[0].display_name);
+        assert_eq!(records[0].location.cached_token(), Some("1"));
+        assert_eq!(records[1].location.cached_token(), Some("2"));
+    }
+
+    #[test]
+    fn malformed_attachment_records_fail_at_the_camel_boundary() {
+        for records in ["", "name", "name\t0", "name\tnot-a-token", "%FF\t1"] {
+            assert!(parse_attachment_records(records).is_err());
+        }
     }
 
     #[test]

@@ -1,5 +1,5 @@
 Name:           pigeon-mail
-Version:        0.1.4
+Version:        0.2.0
 Release:        1%{?dist}
 Summary:        GNOME email client using Evolution Data Server
 URL:            https://github.com/fxzxmicah/pigeon-mail
@@ -75,6 +75,11 @@ glib-compile-schemas --strict --dry-run %{buildroot}%{_datadir}/glib-2.0/schemas
 %{_datadir}/icons/hicolor/scalable/apps/org.gnome.pigeon.svg
 
 %changelog
+* Thu Sep 17 2026 Fxzx micah <48860358+fxzxmicah@users.noreply.github.com> - 0.2.0-1
+- Store sending identities and signatures through Evolution Data Server
+- Make local Drafts, Outbox, and Sent folders the cache-first write boundary
+- Refine adaptive mailbox, composition, settings, and asynchronous task handling
+
 * Mon Aug 24 2026 Fxzx micah <48860358+fxzxmicah@users.noreply.github.com> - 0.1.4-1
 - Return cached messages without waiting for another message download
 - Reject stale cache probes before they enter the remote detail queue
