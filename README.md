@@ -48,7 +48,7 @@ Pigeon Mail targets current GNOME desktops and requires:
 - WebKitGTK 6.0 with the 2.50 API
 - Evolution Data Server development files providing `camel-1.2` and
   `libedataserver-1.2`
-- `glib-compile-schemas`, a C compiler, and `pkg-config`
+- GNU gettext, `glib-compile-schemas`, a C compiler, and `pkg-config`
 - GNOME Online Accounts at runtime
 
 Fedora is the primary development and packaging environment. See

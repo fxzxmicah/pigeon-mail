@@ -1,3 +1,4 @@
 target
 build.log
 data/gschemas.compiled
+po/pigeon.pot

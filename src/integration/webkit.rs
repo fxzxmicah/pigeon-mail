@@ -39,7 +39,7 @@ struct ComposerSignatureUpdate {
     html: String,
 }
 
-type SnapshotHandler = Box<dyn FnOnce(Result<ComposerContent, String>)>;
+type SnapshotHandler = Box<dyn FnOnce(Result<ComposerContent, ()>)>;
 
 pub struct WebKitComposer {
     view: webkit::WebView,
@@ -102,7 +102,7 @@ impl WebKitComposer {
                 let result = if generation_for_message.get() == message_generation {
                     Ok(content.clone())
                 } else {
-                    Err(superseded_snapshot_error())
+                    Err(())
                 };
                 handler(result);
             }
@@ -157,7 +157,7 @@ impl WebKitComposer {
         );
     }
 
-    pub fn capture_content<F: FnOnce(Result<ComposerContent, String>) + 'static>(
+    pub fn capture_content<F: FnOnce(Result<ComposerContent, ()>) + 'static>(
         &self,
         handler: F,
     ) {
@@ -180,9 +180,7 @@ impl WebKitComposer {
                         return;
                     };
                     crate::logging::report_failure("compose-snapshot", &error.into());
-                    handler(Err(
-                        "The current message could not be read from the editor.".into(),
-                    ));
+                    handler(Err(()));
                 }
             },
         );
@@ -213,17 +211,13 @@ impl WebKitComposer {
         self.load_document();
 
         for (_, handler) in superseded_handlers {
-            handler(Err(superseded_snapshot_error()));
+            handler(Err(()));
         }
     }
 
     pub fn current_content(&self) -> ComposerContent {
         self.content.borrow().clone()
     }
-}
-
-fn superseded_snapshot_error() -> String {
-    "The editor content changed before it could be captured.".into()
 }
 
 fn apply_composer_update(

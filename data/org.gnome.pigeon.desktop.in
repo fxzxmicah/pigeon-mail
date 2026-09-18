@@ -1,3 +1,4 @@
+# Translations are merged from po/ when the application is installed.
 [Desktop Entry]
 Name=Pigeon Mail
 GenericName=Email Client

@@ -6,6 +6,7 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use crate::core::coordinator::MailCoordinator;
+use crate::i18n::gettext;
 use crate::integration::webkit::WebKitComposer;
 use crate::model::account::{MailAccount, SendingIdentity, Signature};
 use crate::model::event::RequestId;
@@ -223,7 +224,7 @@ impl SettingsDialog {
         drop(state);
         self.main_view.refresh(&snapshot);
         if let Some((account, identity)) = editor_identity {
-            self.editor_view.page.set_title("Edit Alias");
+            self.editor_view.page.set_title(&gettext("Edit Alias"));
             self.editor_view.load(&account, &identity);
         }
     }
@@ -237,7 +238,7 @@ pub(super) fn build_settings(
     let window = adw::Window::builder()
         .transient_for(parent)
         .modal(true)
-        .title("Mail Settings")
+        .title(gettext("Mail Settings"))
         .default_width(640)
         .default_height(560)
         .build();
@@ -249,7 +250,7 @@ pub(super) fn build_settings(
     let account_dropdown = gtk::DropDown::new(None::<gtk::StringList>, None::<gtk::Expression>);
     let account_name_entry = gtk::Entry::builder().hexpand(true).build();
     let account_name_label = gtk::Label::builder()
-        .label("Account _Name")
+        .label(gettext("Account _Name"))
         .use_underline(true)
         .xalign(0.0)
         .css_classes(["mail-form-label"])
@@ -257,10 +258,10 @@ pub(super) fn build_settings(
     account_name_label.set_mnemonic_widget(Some(&account_name_entry));
 
     let alias_list = gtk::ListBox::builder().css_classes(["boxed-list"]).build();
-    let add_alias_button = gtk::Button::with_label("Add");
-    let edit_alias_button = gtk::Button::with_label("Edit");
-    let remove_alias_button = gtk::Button::with_label("Remove");
-    let default_alias_button = gtk::Button::with_label("Set Default");
+    let add_alias_button = gtk::Button::with_label(&gettext("Add"));
+    let edit_alias_button = gtk::Button::with_label(&gettext("Edit"));
+    let remove_alias_button = gtk::Button::with_label(&gettext("Remove"));
+    let default_alias_button = gtk::Button::with_label(&gettext("Set Default"));
     let alias_actions = adw::WrapBox::builder()
         .child_spacing(8)
         .line_spacing(8)
@@ -296,7 +297,7 @@ pub(super) fn build_settings(
     name_row.attach(&account_name_label, 0, 0, 1, 1);
     name_row.attach(&account_name_entry, 1, 0, 1, 1);
     let alias_header = gtk::Label::builder()
-        .label("Aliases")
+        .label(gettext("Aliases"))
         .xalign(0.0)
         .css_classes(["title-3"])
         .margin_top(4)
@@ -309,7 +310,7 @@ pub(super) fn build_settings(
     let username_entry = gtk::Entry::builder().hexpand(true).build();
     let email_entry = gtk::Entry::builder().hexpand(true).build();
     let reply_to_entry = gtk::Entry::builder()
-        .placeholder_text("Optional Reply-To")
+        .placeholder_text(gettext("Optional Reply-To"))
         .hexpand(true)
         .build();
     let DualFormatEditor {
@@ -319,7 +320,7 @@ pub(super) fn build_settings(
         convert_button: convert_signature_button,
         mode_controls: signature_mode_controls,
         frame: signature_frame,
-    } = DualFormatEditor::new("Signature");
+    } = DualFormatEditor::new(&gettext("Signature"));
     let signature_section = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
         .spacing(6)
@@ -328,7 +329,7 @@ pub(super) fn build_settings(
     signature_section.append(&signature_mode_controls);
     signature_section.append(&signature_frame);
     let apply_alias_button = gtk::Button::builder()
-        .label("Apply")
+        .label(gettext("Apply"))
         .css_classes(["suggested-action"])
         .halign(gtk::Align::End)
         .build();
@@ -338,12 +339,12 @@ pub(super) fn build_settings(
         .column_spacing(12)
         .build();
     for (row, label_text, entry) in [
-        (0, "_Name", &username_entry),
-        (1, "_Address", &email_entry),
-        (2, "_Reply-To", &reply_to_entry),
+        (0, gettext("_Name"), &username_entry),
+        (1, gettext("_Address"), &email_entry),
+        (2, gettext("_Reply-To"), &reply_to_entry),
     ] {
         let label = gtk::Label::builder()
-            .label(label_text)
+            .label(&label_text)
             .use_underline(true)
             .xalign(0.0)
             .css_classes(["mail-form-label"])
@@ -367,7 +368,7 @@ pub(super) fn build_settings(
     let main_header = adw::HeaderBar::new();
     main_header.pack_start(&account_dropdown);
     let save_button = gtk::Button::builder()
-        .label("Save")
+        .label(gettext("Save"))
         .css_classes(["suggested-action"])
         .build();
     main_header.pack_end(&save_button);
@@ -388,9 +389,9 @@ pub(super) fn build_settings(
     editor_toolbar.set_content(Some(&editor_scroller));
 
     let main_navigation_page =
-        adw::NavigationPage::with_tag(&main_toolbar, "Mail Settings", "main");
+        adw::NavigationPage::with_tag(&main_toolbar, &gettext("Mail Settings"), "main");
     let editor_navigation_page =
-        adw::NavigationPage::with_tag(&editor_toolbar, "Edit Alias", "editor");
+        adw::NavigationPage::with_tag(&editor_toolbar, &gettext("Edit Alias"), "editor");
     let navigation = adw::NavigationView::new();
     navigation.add(&main_navigation_page);
     navigation.add(&editor_navigation_page);
@@ -446,6 +447,7 @@ pub(super) fn build_settings(
     let text = signature_text_editor.clone();
     let stack = signature_stack.clone();
     let nav = navigation.clone();
+    let toast = toast_overlay.clone();
     convert_signature_button.connect_clicked(move |_| {
         if stack.visible_child_name().as_deref() == Some("text") {
             let buffer = text.buffer();
@@ -462,11 +464,17 @@ pub(super) fn build_settings(
             let nav = nav.clone();
             let text = text.clone();
             let stack = stack.clone();
+            let toast = toast.clone();
             composer.capture_content(move |content| {
                 nav.set_sensitive(true);
-                if let Ok(content) = content {
-                    text.buffer().set_text(&content.text);
-                    stack.set_visible_child_name("text");
+                match content {
+                    Ok(content) => {
+                        text.buffer().set_text(&content.text);
+                        stack.set_visible_child_name("text");
+                    }
+                    Err(()) => {
+                        toast.add_toast(adw::Toast::new(&gettext("Signature not converted.")));
+                    }
                 }
             });
         }
@@ -509,7 +517,7 @@ pub(super) fn build_settings(
             return;
         };
         editor_for_edit.load(&account, &identity);
-        editor_for_edit.page.set_title("Edit Alias");
+        editor_for_edit.page.set_title(&gettext("Edit Alias"));
         nav_for_edit.push_by_tag("editor");
     });
 
@@ -522,7 +530,7 @@ pub(super) fn build_settings(
             return;
         }
         editor_for_add.clear();
-        editor_for_add.page.set_title("Add Alias");
+        editor_for_add.page.set_title(&gettext("Add Alias"));
         nav_for_add.push_by_tag("editor");
         editor_for_add.name.grab_focus();
     });
@@ -557,6 +565,7 @@ pub(super) fn build_settings(
         editor_for_apply.composer.capture_content(move |content| {
             nav.set_sensitive(true);
             let Ok(content) = content else {
+                toast.add_toast(adw::Toast::new(&gettext("Alias not changed.")));
                 return;
             };
             let identity = SendingIdentity::new(
@@ -571,7 +580,7 @@ pub(super) fn build_settings(
             let mut state = state.borrow_mut();
             if !state.apply_editor(&target, identity) {
                 drop(state);
-                toast.add_toast(adw::Toast::new("Alias not changed."));
+                toast.add_toast(adw::Toast::new(&gettext("Alias not changed.")));
                 return;
             }
             let snapshot = state.view_snapshot();
@@ -613,7 +622,7 @@ pub(super) fn build_settings(
     save_button.connect_clicked(move |_| {
         let accounts = state_for_save.borrow().accounts_to_save();
         let Some(accounts) = accounts else {
-            toast_for_save.add_toast(adw::Toast::new("Account name is empty."));
+            toast_for_save.add_toast(adw::Toast::new(&gettext("Account name is empty.")));
             return;
         };
         nav_for_save.set_sensitive(false);
@@ -674,7 +683,7 @@ fn rebuild_alias_list(list: &gtk::ListBox, account: Option<&MailAccount>) {
         line.append(&title);
         if account.is_default_identity(&identity.address) {
             let badge = gtk::Label::builder()
-                .label("Default")
+                .label(gettext("Default"))
                 .css_classes(["accent", "caption"])
                 .valign(gtk::Align::Center)
                 .build();

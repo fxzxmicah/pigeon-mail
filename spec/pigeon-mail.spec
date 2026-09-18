@@ -1,5 +1,5 @@
 Name:           pigeon-mail
-Version:        0.2.0
+Version:        0.2.1
 Release:        1%{?dist}
 Summary:        GNOME email client using Evolution Data Server
 URL:            https://github.com/fxzxmicah/pigeon-mail
@@ -13,6 +13,7 @@ BuildRequires:  gcc
 BuildRequires:  desktop-file-utils
 BuildRequires:  appstream
 BuildRequires:  glib2
+BuildRequires:  gettext
 BuildRequires:  pkgconfig(camel-1.2)
 BuildRequires:  pkgconfig(libedataserver-1.2)
 
@@ -33,18 +34,30 @@ HTML mail, attachments, drafts, search, and cache-first message actions.
 
 %build
 %cargo_license_summary
-%cargo_build
+PREFIX=%{_prefix} %cargo_build
 
 %install
 install -Dpm0755 target/rpm/pigeon %{buildroot}%{_bindir}/pigeon
 
-desktop-file-install \
-    --dir=%{buildroot}%{_datadir}/applications \
-    data/org.gnome.pigeon.desktop
+install -d %{buildroot}%{_datadir}/applications
+msgfmt --desktop \
+    --template=data/org.gnome.pigeon.desktop.in \
+    -d po \
+    -o %{buildroot}%{_datadir}/applications/org.gnome.pigeon.desktop
 
-install -Dpm0644 \
-    data/org.gnome.pigeon.metainfo.xml \
-    %{buildroot}%{_metainfodir}/org.gnome.pigeon.metainfo.xml
+install -d %{buildroot}%{_metainfodir}
+msgfmt --xml \
+    --template=data/org.gnome.pigeon.metainfo.xml.in \
+    -d po \
+    -o %{buildroot}%{_metainfodir}/org.gnome.pigeon.metainfo.xml
+
+languages=$(sed 's/#.*//' po/LINGUAS)
+for lang in $languages; do
+    install -d %{buildroot}%{_datadir}/locale/$lang/LC_MESSAGES
+    msgfmt --check \
+        -o %{buildroot}%{_datadir}/locale/$lang/LC_MESSAGES/pigeon.mo \
+        po/$lang.po
+done
 
 install -Dpm0644 \
     data/icons/hicolor/scalable/apps/org.gnome.pigeon.svg \
@@ -59,13 +72,15 @@ sed 's#@bindir@#%{_bindir}#g' \
     data/org.gnome.pigeon.service.in \
     > %{buildroot}%{_datadir}/dbus-1/services/org.gnome.pigeon.service
 
+%find_lang pigeon
+
 %check
 %cargo_test
 desktop-file-validate %{buildroot}%{_datadir}/applications/org.gnome.pigeon.desktop
 appstreamcli validate --no-net --pedantic %{buildroot}%{_metainfodir}/org.gnome.pigeon.metainfo.xml
 glib-compile-schemas --strict --dry-run %{buildroot}%{_datadir}/glib-2.0/schemas
 
-%files
+%files -f pigeon.lang
 %license LICENSE
 %{_bindir}/pigeon
 %{_datadir}/applications/org.gnome.pigeon.desktop
@@ -75,6 +90,11 @@ glib-compile-schemas --strict --dry-run %{buildroot}%{_datadir}/glib-2.0/schemas
 %{_datadir}/icons/hicolor/scalable/apps/org.gnome.pigeon.svg
 
 %changelog
+* Fri Sep 18 2026 Fxzx micah <48860358+fxzxmicah@users.noreply.github.com> - 0.2.1-1
+- Add German, Spanish, French, Japanese, and Simplified Chinese localization
+- Align attachment presentation across reading and composition
+- Refine localized mail dates and close confirmations
+
 * Thu Sep 17 2026 Fxzx micah <48860358+fxzxmicah@users.noreply.github.com> - 0.2.0-1
 - Store sending identities and signatures through Evolution Data Server
 - Make local Drafts, Outbox, and Sent folders the cache-first write boundary

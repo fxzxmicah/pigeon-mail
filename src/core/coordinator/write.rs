@@ -1,4 +1,5 @@
 use crate::core::mail::AccountMailService;
+use crate::i18n::gettext;
 use crate::model::account::{MailAccount, MailAccountId};
 use crate::model::event::{MailEvent, RequestId};
 use crate::model::mail::{
@@ -63,7 +64,7 @@ impl MailCoordinator {
         let Some(service) = self.service().lease_account(&account_id) else {
             self.publish(MailEvent::MessageActionCompleted {
                 request_id,
-                result: Err("Change not saved.".into()),
+                result: Err(gettext("Change not saved.")),
             });
             return;
         };
@@ -90,7 +91,7 @@ impl MailCoordinator {
                 .save_account_identities(&accounts)
                 .map_err(|error| {
                     crate::logging::report_failure("eds-identity-save", &error);
-                    "Changes not saved.".to_string()
+                    gettext("Changes not saved.")
                 });
             coordinator.publish(MailEvent::AccountIdentitiesSaveCompleted {
                 request_id,
@@ -112,10 +113,10 @@ impl MailCoordinator {
         let Some(service) = service_router.lease_account(&draft.account_id) else {
             match operation {
                 DraftWrite::Save => self.publish(MailEvent::DraftSaveCompleted {
-                    result: Err("Draft not saved.".into()),
+                    result: Err(gettext("Draft not saved.")),
                 }),
                 DraftWrite::Send => self.publish(MailEvent::SendCompleted {
-                    result: Err("Message not sent.".into()),
+                    result: Err(gettext("Message not sent.")),
                 }),
             }
             return;
@@ -167,7 +168,7 @@ impl MailCoordinator {
             .apply_message_action(&conversation_id, &action)
             .map_err(|error| {
                 crate::logging::report_failure("mail-action-cache-commit", &error);
-                "Change not saved.".to_string()
+                gettext("Change not saved.")
             });
         let requires_convergence = result
             .as_ref()
@@ -199,7 +200,7 @@ impl MailCoordinator {
                     .and_then(|message| service.save_draft(&message))
                     .map_err(|error| {
                         crate::logging::report_failure("draft-cache-save", &error);
-                        "Draft not saved.".to_string()
+                        gettext("Draft not saved.")
                     });
                 let cache_changed = matches!(&result, Ok(Some(_)));
                 self.publish(MailEvent::DraftSaveCompleted { result });
@@ -210,7 +211,7 @@ impl MailCoordinator {
                     .and_then(|message| service.queue_delivery(&message))
                     .map_err(|error| {
                         crate::logging::report_failure("message-send", &error);
-                        "Message not sent.".to_string()
+                        gettext("Message not sent.")
                     });
                 let cache_changed = result
                     .as_ref()

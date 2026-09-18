@@ -2217,10 +2217,15 @@ unsafe fn conversation_from_message_info(
     let flags = unsafe { camel_message_info_get_flags(info) };
     let subject = cstr_to_string(unsafe { camel_message_info_get_subject(info) })
         .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| "(No subject)".into());
+        .unwrap_or_default();
     let from = cstr_to_string(unsafe { camel_message_info_get_from(info) })
         .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| "Unknown sender".into());
+        .unwrap_or_default();
+    let participants = if from.is_empty() {
+        Vec::new()
+    } else {
+        vec![compact_participant(&from)]
+    };
     let preview = cstr_to_string(unsafe { camel_message_info_get_preview(info) })
         .unwrap_or_default()
         .trim()
@@ -2233,7 +2238,7 @@ unsafe fn conversation_from_message_info(
         id: ConversationId(compose_conversation_id(folder_name, &uid)),
         folder_id: FolderId(folder_name.into()),
         subject,
-        participants: vec![compact_participant(&from)],
+        participants,
         message_count: 1,
         unread_count: if flags & CAMEL_MESSAGE_SEEN == 0 {
             1
@@ -2265,10 +2270,10 @@ unsafe fn build_message_detail(
     let subject = cstr_to_string(unsafe { camel_mime_message_get_subject(message) })
         .filter(|value| !value.trim().is_empty())
         .or(info_subject)
-        .unwrap_or_else(|| "(No subject)".into());
+        .unwrap_or_default();
     let from = unsafe { first_address_string(camel_mime_message_get_from(message)) }
         .or(info_from)
-        .unwrap_or_else(|| "Unknown sender".into());
+        .unwrap_or_default();
     let reply_to = unsafe { first_address_string(camel_mime_message_get_reply_to(message)) };
     let to = unsafe {
         address_list_strings(camel_mime_message_get_recipients(
@@ -2323,7 +2328,7 @@ unsafe fn build_message_detail(
         cc,
         bcc,
         reply_to,
-        date_label: format_message_date(date_secs),
+        date_unix_secs: date_secs,
         starred: (info_flags & CAMEL_MESSAGE_FLAGGED) != 0,
         unread: (info_flags & CAMEL_MESSAGE_SEEN) == 0,
         attachments,
@@ -2591,22 +2596,6 @@ fn choose_message_timestamp(primary: i64, secondary: i64) -> i64 {
     } else {
         0
     }
-}
-
-fn format_message_date(timestamp_secs: i64) -> String {
-    if timestamp_secs <= 0 {
-        return String::new();
-    }
-
-    let datetime = match glib::DateTime::from_unix_local(timestamp_secs) {
-        Ok(datetime) => datetime,
-        Err(_) => return String::new(),
-    };
-
-    datetime
-        .format("%Y-%m-%d %H:%M")
-        .map(|value| value.to_string())
-        .unwrap_or_default()
 }
 
 #[cfg(debug_assertions)]

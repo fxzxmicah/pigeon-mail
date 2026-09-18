@@ -1,6 +1,7 @@
 use adw::prelude::*;
 use std::rc::Rc;
 
+use crate::i18n::gettext;
 use crate::integration::webkit::WebKitComposer;
 
 pub(super) struct DualFormatEditor {
@@ -33,8 +34,8 @@ impl DualFormatEditor {
             .vhomogeneous(false)
             .vexpand(true)
             .build();
-        stack.add_titled(&rich_editor, Some("html"), "HTML");
-        stack.add_titled(&text_scroller, Some("text"), "Text");
+        stack.add_titled(&rich_editor, Some("html"), &gettext("HTML"));
+        stack.add_titled(&text_scroller, Some("text"), &gettext("Text"));
         stack.set_visible_child_name("html");
 
         let formatting_bar = rich_text_formatting_bar(&composer);
@@ -50,7 +51,7 @@ impl DualFormatEditor {
             .build();
         let convert_button = gtk::Button::builder()
             .icon_name("format-text-plaintext-symbolic")
-            .tooltip_text("Convert")
+            .tooltip_text(gettext("Convert"))
             .build();
         let mode_controls = gtk::Box::builder()
             .spacing(6)
@@ -88,28 +89,32 @@ impl DualFormatEditor {
 fn rich_text_formatting_bar(composer: &Rc<WebKitComposer>) -> gtk::Box {
     let bar = gtk::Box::builder().spacing(4).build();
     for (icon, tooltip, command) in [
-        ("format-text-bold-symbolic", "Bold", "Bold"),
-        ("format-text-italic-symbolic", "Italic", "Italic"),
-        ("format-text-underline-symbolic", "Underline", "Underline"),
+        ("format-text-bold-symbolic", gettext("Bold"), "Bold"),
+        ("format-text-italic-symbolic", gettext("Italic"), "Italic"),
+        (
+            "format-text-underline-symbolic",
+            gettext("Underline"),
+            "Underline",
+        ),
         (
             "format-text-strikethrough-symbolic",
-            "Strikethrough",
+            gettext("Strikethrough"),
             "Strikethrough",
         ),
         (
             "format-list-unordered-symbolic",
-            "Bulleted list",
+            gettext("Bulleted list"),
             "InsertUnorderedList",
         ),
         (
             "format-list-ordered-symbolic",
-            "Numbered list",
+            gettext("Numbered list"),
             "InsertOrderedList",
         ),
     ] {
         let button = gtk::Button::builder()
             .icon_name(icon)
-            .tooltip_text(tooltip)
+            .tooltip_text(&tooltip)
             .css_classes(["flat"])
             .build();
         let composer = Rc::clone(composer);

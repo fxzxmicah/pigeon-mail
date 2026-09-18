@@ -1,3 +1,4 @@
+use crate::i18n::gettext;
 use crate::model::event::MailEvent;
 use crate::model::mail::{
     AttachmentInfo, AttachmentLocation, AttachmentOperation, AttachmentSource,
@@ -31,7 +32,7 @@ impl MailCoordinator {
             self.publish(MailEvent::AttachmentPrepared {
                 operation,
                 display_name,
-                result: Err("Attachment unavailable.".into()),
+                result: Err(gettext("Attachment unavailable.")),
             });
             return;
         };
@@ -39,7 +40,7 @@ impl MailCoordinator {
             self.publish(MailEvent::AttachmentPrepared {
                 operation,
                 display_name,
-                result: Err("Attachment unavailable.".into()),
+                result: Err(gettext("Attachment unavailable.")),
             });
             return;
         };
@@ -52,10 +53,10 @@ impl MailCoordinator {
             )
             .map_err(|error| {
                 crate::logging::report_failure("attachment-prepare", &error);
-                "Attachment unavailable.".to_string()
+                gettext("Attachment unavailable.")
             })
             .and_then(|prepared_uri| {
-                prepared_uri.ok_or_else(|| "Attachment unavailable.".to_string())
+                prepared_uri.ok_or_else(|| gettext("Attachment unavailable."))
             });
             coordinator.publish(MailEvent::AttachmentPrepared {
                 operation,

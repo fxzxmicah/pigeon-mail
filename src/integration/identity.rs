@@ -62,7 +62,7 @@ mod tests {
     }
 
     #[test]
-    fn native_alias_decoding_handles_encoded_names_and_rejects_invalid_bridge_input() {
+    fn eds_alias_decoding_handles_encoded_names_and_rejects_invalid_bridge_input() {
         let aliases = decode_addresses(
             "=?UTF-8?Q?Jos=C3=A9?= <jose@example.test>, bare@example.net, comment@example.test (Comment)",
         ).unwrap();
@@ -78,7 +78,7 @@ mod tests {
     }
 
     #[test]
-    fn extensionless_eds_aliases_use_the_native_address_set() {
+    fn extensionless_eds_aliases_use_the_standard_address_set() {
         let mut account = MailAccount::new(
             MailAccountId("account-1".into()),
             "Account".into(),

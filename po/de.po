@@ -1,0 +1,586 @@
+msgid ""
+msgstr ""
+"Project-Id-Version: Pigeon Mail 0.2.1\n"
+"Report-Msgid-Bugs-To: https://github.com/fxzxmicah/pigeon-mail/issues\n"
+"POT-Creation-Date: 2026-09-18 00:00+0000\n"
+"PO-Revision-Date: 2026-09-18 00:00+0000\n"
+"Last-Translator: Pigeon Mail contributors\n"
+"Language-Team: German\n"
+"Language: de\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Plural-Forms: nplurals=2; plural=(n != 1);\n"
+
+msgid "About"
+msgstr "Über"
+
+msgid "Account _Name"
+msgstr "Kontoname (_N)"
+
+msgid "Account name is empty."
+msgstr "Der Kontoname ist leer."
+
+msgid "Actions"
+msgstr "Aktionen"
+
+msgid "Add"
+msgstr "Hinzufügen"
+
+msgid "Add Alias"
+msgstr "Alias hinzufügen"
+
+msgid "Add attachments"
+msgstr "Anhänge hinzufügen"
+
+msgid "Alias not changed."
+msgstr "Alias wurde nicht geändert."
+
+msgid "Aliases"
+msgstr "Aliasse"
+
+msgid "Apply"
+msgstr "Anwenden"
+
+msgid "Archive"
+msgstr "Archivieren"
+
+msgid "Archived"
+msgstr "Archiviert"
+
+msgid "Attach"
+msgstr "Anhängen"
+
+msgid "Attachment"
+msgstr "Anhang"
+
+msgid "Attachment unavailable."
+msgstr "Anhang ist nicht verfügbar."
+
+msgid "Attachments"
+msgstr "Anhänge"
+
+msgid "Authentication failed"
+msgstr "Authentifizierung fehlgeschlagen"
+
+msgid "Back"
+msgstr "Zurück"
+
+msgid "Back to mailbox"
+msgstr "Zurück zum Postfach"
+
+msgid "Bcc recipients"
+msgstr "Blindkopie-Empfänger"
+
+msgid "Bold"
+msgstr "Fett"
+
+msgid "Bulleted list"
+msgstr "Aufzählung"
+
+msgid "Cache reload failed."
+msgstr "Cache konnte nicht neu geladen werden."
+
+msgid "Cache unavailable"
+msgstr "Cache nicht verfügbar"
+
+msgid "Cancel"
+msgstr "Abbrechen"
+
+msgid "Cc recipients"
+msgstr "Kopie-Empfänger"
+
+msgid "Cc/Bcc"
+msgstr "Cc/Bcc"
+
+msgid "Cc: {recipients}"
+msgstr "Cc: {recipients}"
+
+msgid "Change not saved."
+msgstr "Änderung wurde nicht gespeichert."
+
+msgid "Changes not saved."
+msgstr "Änderungen wurden nicht gespeichert."
+
+msgid "Close"
+msgstr "Schließen"
+
+msgid "Compose"
+msgstr "Verfassen"
+
+msgid "Continue Editing"
+msgstr "Weiter bearbeiten"
+
+msgid "Convert"
+msgstr "Umwandeln"
+
+msgid "Copy"
+msgstr "Kopieren"
+
+msgid "Default"
+msgstr "Standard"
+
+msgid "Discard"
+msgstr "Verwerfen"
+
+msgid "Draft loaded"
+msgstr "Entwurf geladen"
+
+msgid "Draft not saved."
+msgstr "Entwurf wurde nicht gespeichert."
+
+msgid "Draft ready"
+msgstr "Entwurf bereit"
+
+msgid "Draft saved"
+msgstr "Entwurf gespeichert"
+
+msgid "Drafts"
+msgstr "Entwürfe"
+
+msgid "Edit"
+msgstr "Bearbeiten"
+
+msgid "Edit Alias"
+msgstr "Alias bearbeiten"
+
+msgid "Edit Draft"
+msgstr "Entwurf bearbeiten"
+
+msgid "Folder is empty."
+msgstr "Der Ordner ist leer."
+
+msgid "Folders"
+msgstr "Ordner"
+
+msgid "Forward"
+msgstr "Weiterleiten"
+
+msgid "From: {sender}    {date}"
+msgstr "Von: {sender}    {date}"
+
+msgid "HTML"
+msgstr "HTML"
+
+msgid "Identity unavailable"
+msgstr "Identität nicht verfügbar"
+
+msgid "In Trash"
+msgstr "Im Papierkorb"
+
+msgid "Inbox"
+msgstr "Posteingang"
+
+msgid "Italic"
+msgstr "Kursiv"
+
+msgid "Link not opened."
+msgstr "Link wurde nicht geöffnet."
+
+msgid "Loading folders…"
+msgstr "Ordner werden geladen…"
+
+msgid "Loading mail"
+msgstr "E-Mails werden geladen"
+
+msgid "Loading mail…"
+msgstr "E-Mails werden geladen…"
+
+msgid "Loading message"
+msgstr "Nachricht wird geladen"
+
+msgid "Loading messages"
+msgstr "Nachrichten werden geladen"
+
+msgid "Local cache has no matches."
+msgstr "Keine Treffer im lokalen Cache."
+
+msgid "Mail Settings"
+msgstr "E-Mail-Einstellungen"
+
+msgid "Mail link unavailable."
+msgstr "E-Mail-Link ist nicht verfügbar."
+
+msgid "Mail unavailable"
+msgstr "E-Mail nicht verfügbar"
+
+msgid "Mailbox"
+msgstr "Postfach"
+
+msgid "Mark Read"
+msgstr "Als gelesen markieren"
+
+msgid "Mark Unread"
+msgstr "Als ungelesen markieren"
+
+msgid "Message"
+msgstr "Nachricht"
+
+msgid "Message not converted"
+msgstr "Nachricht wurde nicht umgewandelt"
+
+msgid "Message not sent."
+msgstr "Nachricht wurde nicht gesendet."
+
+msgid "Message unavailable"
+msgstr "Nachricht nicht verfügbar"
+
+msgid "Message unavailable."
+msgstr "Nachricht ist nicht verfügbar."
+
+msgid "Messages"
+msgstr "Nachrichten"
+
+msgid "Messages unavailable"
+msgstr "Nachrichten nicht verfügbar"
+
+msgid "Messages unavailable."
+msgstr "Nachrichten sind nicht verfügbar."
+
+msgid "Modified"
+msgstr "Geändert"
+
+msgid "More headers"
+msgstr "Weitere Kopfzeilen"
+
+msgid "Move to Trash"
+msgstr "In den Papierkorb verschieben"
+
+msgid "New Message"
+msgstr "Neue Nachricht"
+
+msgid "New mail"
+msgstr "Neue E-Mail"
+
+msgid "No attachments"
+msgstr "Keine Anhänge"
+
+msgid "No mail account"
+msgstr "Kein E-Mail-Konto"
+
+msgid "No matches"
+msgstr "Keine Treffer"
+
+msgid "No message selected"
+msgstr "Keine Nachricht ausgewählt"
+
+msgid "No messages"
+msgstr "Keine Nachrichten"
+
+msgid "Not saved"
+msgstr "Nicht gespeichert"
+
+msgid "Not sent"
+msgstr "Nicht gesendet"
+
+msgid "Numbered list"
+msgstr "Nummerierte Liste"
+
+msgid "Offline"
+msgstr "Offline"
+
+msgid "Open"
+msgstr "Öffnen"
+
+msgid "Open Draft"
+msgstr "Entwurf öffnen"
+
+msgid "Opening local cache…"
+msgstr "Lokaler Cache wird geöffnet…"
+
+msgid "Optional Reply-To"
+msgstr "Optionale Antwortadresse"
+
+msgid "Outbox"
+msgstr "Postausgang"
+
+msgid "Pigeon Mail contributors"
+msgstr "Mitwirkende von Pigeon Mail"
+
+msgid "Queued"
+msgstr "In Warteschlange"
+
+msgid "Reading the local mail cache…"
+msgstr "Lokaler E-Mail-Cache wird gelesen…"
+
+msgid "Recipients"
+msgstr "Empfänger"
+
+msgid "Refresh current account"
+msgstr "Aktuelles Konto aktualisieren"
+
+msgid "Refresh unavailable"
+msgstr "Aktualisierung nicht verfügbar"
+
+msgid "Remove"
+msgstr "Entfernen"
+
+msgid "Reply"
+msgstr "Antworten"
+
+msgid "Reply All"
+msgstr "Allen antworten"
+
+msgid "Reply-To: {address}"
+msgstr "Antwortadresse: {address}"
+
+msgid "Save"
+msgstr "Speichern"
+
+msgid "Save As"
+msgstr "Speichern unter"
+
+msgid "Save Draft"
+msgstr "Entwurf speichern"
+
+msgid "Save attachment"
+msgstr "Anhang speichern"
+
+msgid "Saving…"
+msgstr "Wird gespeichert…"
+
+msgid "Search"
+msgstr "Suchen"
+
+msgid "Search current account"
+msgstr "Aktuelles Konto durchsuchen"
+
+msgid "Search unavailable."
+msgstr "Suche ist nicht verfügbar."
+
+msgid "Searching local cache…"
+msgstr "Lokaler Cache wird durchsucht…"
+
+msgid "Searching mail"
+msgstr "E-Mails werden durchsucht"
+
+msgid "Select All"
+msgstr "Alles auswählen"
+
+msgid "Select a message to read it."
+msgstr "Wählen Sie eine Nachricht zum Lesen aus."
+
+msgid "Send"
+msgstr "Senden"
+
+msgid "Sending…"
+msgstr "Wird gesendet…"
+
+msgid "Sent"
+msgstr "Gesendet"
+
+msgid "Set Default"
+msgstr "Als Standard festlegen"
+
+msgid "Signature"
+msgstr "Signatur"
+
+msgid "Signature not converted."
+msgstr "Signatur nicht konvertiert."
+
+msgid "Star"
+msgstr "Markieren"
+
+msgid "Starred"
+msgstr "Markiert"
+
+msgid "Strikethrough"
+msgstr "Durchgestrichen"
+
+msgid "Subject"
+msgstr "Betreff"
+
+msgid "Switching account…"
+msgstr "Konto wird gewechselt…"
+
+msgid "Tasks still pending"
+msgstr "Aufgaben noch ausstehend"
+
+msgid "Text"
+msgstr "Text"
+
+msgid "The current message has unsaved changes."
+msgstr "Die aktuelle Nachricht enthält ungespeicherte Änderungen."
+
+msgid "Trash"
+msgstr "Papierkorb"
+
+msgid "Underline"
+msgstr "Unterstrichen"
+
+msgid "Unknown sender"
+msgstr "Unbekannter Absender"
+
+msgid "Unsaved draft"
+msgstr "Ungespeicherter Entwurf"
+
+msgid "Unstar"
+msgstr "Markierung entfernen"
+
+msgid "mail account"
+msgstr "E-Mail-Konto"
+
+msgid "A GNOME mail client powered by Evolution Data Server."
+msgstr "Ein GNOME-E-Mail-Programm auf Basis von Evolution Data Server."
+
+msgid "Email Client"
+msgstr "E-Mail-Programm"
+
+msgid "Read and send email"
+msgstr "E-Mails lesen und senden"
+
+msgid "Compose New Message"
+msgstr "Neue Nachricht verfassen"
+
+msgid "Read and send email on GNOME"
+msgstr "E-Mails unter GNOME lesen und senden"
+
+msgid "mail;email;inbox;message;"
+msgstr "mail;email;inbox;message;E-Mail;Posteingang;Nachricht;"
+
+msgid "(No subject)"
+msgstr "(Kein Betreff)"
+
+msgid "(No subject) ({count})"
+msgstr "(Kein Betreff) ({count})"
+
+msgid "Forward draft ready"
+msgstr "Weiterleitungsentwurf bereit"
+
+msgid "Forward draft saved"
+msgstr "Weiterleitungsentwurf gespeichert"
+
+msgid "Not opened: {attachment}"
+msgstr "Nicht geöffnet: {attachment}"
+
+msgid "Not saved: {attachment}"
+msgstr "Nicht gespeichert: {attachment}"
+
+msgid "Opening {attachment}"
+msgstr "{attachment} wird geöffnet"
+
+msgid "Reply draft ready"
+msgstr "Antwortentwurf bereit"
+
+msgid "Reply draft saved"
+msgstr "Antwortentwurf gespeichert"
+
+msgid "Reply-all draft ready"
+msgstr "Entwurf für Antwort an alle bereit"
+
+msgid "Reply-all draft saved"
+msgstr "Entwurf für Antwort an alle gespeichert"
+
+msgid "Saved {attachment}"
+msgstr "{attachment} gespeichert"
+
+msgid "Search results for “{query}”"
+msgstr "Suchergebnisse für „{query}“"
+
+msgid "To: {recipients}"
+msgstr "An: {recipients}"
+
+msgid "{subject} ({count})"
+msgstr "{subject} ({count})"
+
+msgid "© 2026 Pigeon Mail contributors"
+msgstr "© 2026 Mitwirkende von Pigeon Mail"
+
+msgid "_Address"
+msgstr "_Adresse"
+
+msgid "_Bcc"
+msgstr "_Bcc"
+
+msgid "_Cc"
+msgstr "_Cc"
+
+msgid "_From"
+msgstr "_Von"
+
+msgid "_Name"
+msgstr "_Name"
+
+msgid "_Reply-To"
+msgstr "_Antwortadresse"
+
+msgid "_Subject"
+msgstr "_Betreff"
+
+msgid "_To"
+msgstr "_An"
+
+msgid "Pigeon Mail is a GNOME email client using GNOME Online Accounts and Evolution Data Server for accounts, offline mail storage, and delivery."
+msgstr "Pigeon Mail ist ein GNOME-E-Mail-Programm, das GNOME Online-Konten und Evolution Data Server für Konten, Offline-Speicherung und Zustellung verwendet."
+
+msgid "It supports HTML mail, sending identities, attachments, drafts, search, and cache-first message actions."
+msgstr "Es unterstützt HTML-E-Mails, Sendeidentitäten, Anhänge, Entwürfe, Suche und Cache-zentrierte Nachrichtenaktionen."
+
+msgid "Closing now will discard {count} pending task."
+msgid_plural "Closing now will discard {count} pending tasks."
+msgstr[0] "Beim Schließen wird {count} ausstehende Aufgabe verworfen."
+msgstr[1] "Beim Schließen werden {count} ausstehende Aufgaben verworfen."
+
+msgid "{count} new conversation in {folder} — {account}"
+msgid_plural "{count} new conversations in {folder} — {account}"
+msgstr[0] "{count} neue Unterhaltung in {folder} — {account}"
+msgstr[1] "{count} neue Unterhaltungen in {folder} — {account}"
+
+msgid "{count} task pending"
+msgid_plural "{count} tasks pending"
+msgstr[0] "{count} Aufgabe ausstehend"
+msgstr[1] "{count} Aufgaben ausstehend"
+
+msgid "No usable mail account is currently available."
+msgstr "Derzeit ist kein verwendbares E-Mail-Konto verfügbar."
+
+msgid "Account discovery or the mail service may be unavailable."
+msgstr "Die Kontenerkennung oder der E-Mail-Dienst ist möglicherweise nicht verfügbar."
+
+msgid "Mail account unavailable"
+msgstr "E-Mail-Konto nicht verfügbar"
+
+msgid "Explore the three-pane mailbox"
+msgstr "Das dreigeteilte Postfach erkunden"
+
+msgid "Use the folder list, message list, and reading pane with the mouse or keyboard."
+msgstr "Ordnerliste, Nachrichtenliste und Lesebereich können mit Maus oder Tastatur verwendet werden."
+
+msgid "Use Up and Down inside a list, and Left and Right to move between the folder list, message list, and reading pane. Activating a message opens it; focus and selection remain useful visual indicators."
+msgstr "Verwenden Sie in einer Liste die Pfeiltasten nach oben und unten und wechseln Sie mit links und rechts zwischen Ordnerliste, Nachrichtenliste und Lesebereich. Beim Aktivieren wird eine Nachricht geöffnet; Fokus und Auswahl bleiben hilfreiche visuelle Hinweise."
+
+msgid "Add five translations, align attachment interfaces across reading and composition, and refine localized mail dates and close confirmations."
+msgstr "Fünf Übersetzungen hinzugefügt, die Anhangsansichten beim Lesen und Verfassen vereinheitlicht sowie lokalisierte E-Mail-Datumsangaben und Schließbestätigungen verbessert."
+
+msgid "Rework account identities around EDS, make local mailboxes the cache-first drafts and delivery boundary, and refine the adaptive mailbox, composer, and settings interfaces."
+msgstr "Kontenidentitäten auf EDS umgestellt, lokale Postfächer als Cache-zentrierte Entwurfs- und Zustellgrenze eingerichtet und die adaptiven Oberflächen für Postfach, Verfassen und Einstellungen verfeinert."
+
+msgid "Keep cached message switching responsive during downloads and document the Microsoft 365 alias transport fix."
+msgstr "Wechsel zwischen zwischengespeicherten Nachrichten während Downloads reaktionsfähig gehalten und die Microsoft-365-Korrektur für Alias-Transporte dokumentiert."
+
+msgid "Improve account refresh and recovery, composition state handling, and asynchronous attachment saving."
+msgstr "Kontoaktualisierung und -wiederherstellung, Verfassungsstatus und asynchrones Speichern von Anhängen verbessert."
+
+msgid "Notify from every mail folder, open the real source folder, and improve cached mailbox consistency."
+msgstr "Benachrichtigungen aus allen E-Mail-Ordnern, Öffnen des tatsächlichen Quellordners und verbesserte Konsistenz zwischengespeicherter Postfächer."
+
+msgid "Fix desktop Compose activation, mailto URI handling, and stub composition."
+msgstr "Aktivierung des Verfassens über den Desktop, Verarbeitung von mailto-URIs und Verfassen im Platzhalter korrigiert."
+
+msgid "Date"
+msgstr "Datum"
+
+msgid "Unknown date"
+msgstr "Unbekanntes Datum"
+
+msgid "Forwarded message"
+msgstr "Weitergeleitete Nachricht"
+
+msgid "From"
+msgstr "Von"
+
+msgid "On {date}, {sender} wrote:"
+msgstr "Am {date} schrieb {sender}:"
+
+msgid "To"
+msgstr "An"

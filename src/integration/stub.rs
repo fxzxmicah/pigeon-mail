@@ -1,4 +1,7 @@
 use anyhow::{anyhow, ensure};
+
+use crate::config::APP_NAME;
+use crate::i18n::gettext;
 use crate::integration::backend::{
     BackendChangeCallback, BackendChangeMonitor, MailBackend, RefreshOutcome, SharedMailBackend,
 };
@@ -21,14 +24,14 @@ pub(crate) fn stub_account_id() -> MailAccountId {
 pub(crate) fn stub_account() -> MailAccount {
     MailAccount::new(
         stub_account_id(),
-        "Pigeon Mail Stub".into(),
+        APP_NAME.into(),
         SendingIdentity::new(
             "welcome@pigeon.invalid".into(),
-            "Pigeon Mail".into(),
+            APP_NAME.into(),
             None,
             crate::model::account::Signature {
-                html: "<p>Pigeon Mail</p>".into(),
-                text: "Pigeon Mail".into(),
+                html: format!("<p>{APP_NAME}</p>"),
+                text: APP_NAME.into(),
             },
         ),
     )
@@ -263,49 +266,54 @@ fn ensure_stub_conversation(
     Ok(())
 }
 
-fn standard_folders() -> Vec<(&'static str, &'static str, FolderKind)> {
+fn standard_folders() -> Vec<(&'static str, String, FolderKind)> {
     vec![
-        ("inbox", "Inbox", FolderKind::Inbox),
-        ("drafts", "Drafts", FolderKind::Drafts),
-        ("sent", "Sent", FolderKind::Sent),
-        ("archive", "Archive", FolderKind::Archive),
-        ("trash", "Trash", FolderKind::Trash),
+        ("inbox", gettext("Inbox"), FolderKind::Inbox),
+        ("drafts", gettext("Drafts"), FolderKind::Drafts),
+        ("sent", gettext("Sent"), FolderKind::Sent),
+        ("archive", gettext("Archive"), FolderKind::Archive),
+        ("trash", gettext("Trash"), FolderKind::Trash),
     ]
 }
 
 fn stub_records(recipient: &str) -> Vec<ConversationRecord> {
+    let unavailable = gettext("No usable mail account is currently available.");
+    let unavailable_detail = gettext("Account discovery or the mail service may be unavailable.");
+    let unavailable_body = format!("{unavailable}\n\n{unavailable_detail}");
+    let navigation = gettext(
+        "Use Up and Down inside a list, and Left and Right to move between the folder list, message list, and reading pane. Activating a message opens it; focus and selection remain useful visual indicators.",
+    );
+    let sender = format!("{APP_NAME} <welcome@pigeon.invalid>");
     vec![
         seeded_record(
             "inbox",
             "stub-account",
             "stub-account-message",
-            "Mail account unavailable",
-            vec!["Pigeon Mail".into()],
+            &gettext("Mail account unavailable"),
+            vec![APP_NAME.into()],
             1,
             1,
             true,
-            "No usable mail account is currently available.",
-            "Pigeon Mail Stub <stub@pigeon.invalid>",
+            &unavailable,
+            &sender,
             vec![recipient.into()],
-            "Welcome",
-            "<p><b>No usable mail account is currently available.</b></p><p>Account discovery or the mail service may be unavailable.</p>",
-            "No usable mail account is currently available.\n\nAccount discovery or the mail service may be unavailable.",
+            &crate::model::mail::plain_text_to_html(&unavailable_body),
+            &unavailable_body,
         ),
         seeded_record(
             "inbox",
             "stub-navigation",
             "stub-navigation-message",
-            "Explore the three-pane mailbox",
-            vec!["Pigeon Mail".into()],
+            &gettext("Explore the three-pane mailbox"),
+            vec![APP_NAME.into()],
             1,
             0,
             false,
-            "Use the folder list, message list, and reading pane with the mouse or keyboard.",
-            "Pigeon Mail Stub <stub@pigeon.invalid>",
+            &gettext("Use the folder list, message list, and reading pane with the mouse or keyboard."),
+            &sender,
             vec![recipient.into()],
-            "Welcome",
-            "<p>Use ↑ and ↓ inside a list, and ← and → to move between the folder list, message list, and reading pane. Activating a message opens it; focus and selection remain useful visual indicators.</p>",
-            "Use Up and Down inside a list, and Left and Right to move between the folder list, message list, and reading pane. Activating a message opens it; focus and selection remain useful visual indicators.",
+            &crate::model::mail::plain_text_to_html(&navigation),
+            &navigation,
         ),
     ]
 }
@@ -322,7 +330,6 @@ fn seeded_record(
     preview: &str,
     from: &str,
     to: Vec<String>,
-    date_label: &str,
     body_html: &str,
     body_text: &str,
 ) -> ConversationRecord {
@@ -348,7 +355,7 @@ fn seeded_record(
             cc: Vec::new(),
             bcc: Vec::new(),
             reply_to: None,
-            date_label: date_label.into(),
+            date_unix_secs: 0,
             starred,
             unread: unread_count > 0,
             attachments: Vec::new(),

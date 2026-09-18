@@ -109,13 +109,6 @@ impl AttachmentLocation {
             Self::ExternalUri(_) => None,
         }
     }
-
-    pub fn external_uri(&self) -> Option<&str> {
-        match self {
-            Self::CachedToken(_) => None,
-            Self::ExternalUri(uri) => Some(uri),
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -168,7 +161,7 @@ pub struct MessageDetail {
     pub cc: Vec<String>,
     pub bcc: Vec<String>,
     pub reply_to: Option<String>,
-    pub date_label: String,
+    pub date_unix_secs: i64,
     pub starred: bool,
     pub unread: bool,
     pub attachments: Vec<AttachmentInfo>,

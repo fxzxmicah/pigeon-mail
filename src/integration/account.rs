@@ -282,7 +282,7 @@ fn identity_extension_from_account(
 }
 
 fn apply_identity_extension(account: &mut MailAccount, extension: &IdentityExtension) {
-    let native = account.aliases().to_vec();
+    let standard_identities = account.aliases().to_vec();
     let primary_address = normalized_mailbox_address(&account.primary_identity().address);
     let metadata = extension
         .identities
@@ -291,7 +291,7 @@ fn apply_identity_extension(account: &mut MailAccount, extension: &IdentityExten
         .filter(|(address, _)| !address.is_empty())
         .collect::<HashMap<_, _>>();
     let mut represented = HashSet::new();
-    let mut aliases = Vec::with_capacity(native.len());
+    let mut aliases = Vec::with_capacity(standard_identities.len());
 
     for address in std::iter::once(primary_address.clone()).chain(
         extension
@@ -303,7 +303,7 @@ fn apply_identity_extension(account: &mut MailAccount, extension: &IdentityExten
         if !represented.insert(address.clone()) {
             continue;
         }
-        let Some(identity) = native
+        let Some(identity) = standard_identities
             .iter()
             .find(|identity| normalized_mailbox_address(&identity.address) == address)
             .cloned()
@@ -316,7 +316,7 @@ fn apply_identity_extension(account: &mut MailAccount, extension: &IdentityExten
             address == primary_address,
         ));
     }
-    aliases.extend(native.into_iter().filter(|identity| {
+    aliases.extend(standard_identities.into_iter().filter(|identity| {
         represented.insert(normalized_mailbox_address(&identity.address))
     }));
     let default_address = aliases

@@ -1,4 +1,5 @@
 use crate::core::mail::AccountMailService;
+use crate::i18n::gettext;
 use crate::model::account::MailAccountId;
 use crate::model::event::{MailEvent, RequestId};
 use crate::model::mail::FolderId;
@@ -54,7 +55,7 @@ impl MailCoordinator {
             self.state.mailbox_reads.cancel_pending(&account_id);
             self.publish(MailEvent::ThreadPageLoaded {
                 request_id,
-                result: Err("Messages unavailable.".into()),
+                result: Err(gettext("Messages unavailable.")),
             });
             return;
         };
@@ -96,7 +97,7 @@ impl MailCoordinator {
             .list_conversations(&job.folder_id, job.offset, job.limit)
             .map_err(|error| {
                 crate::logging::report_failure("message-page-load", &error);
-                "Messages unavailable.".to_string()
+                gettext("Messages unavailable.")
             });
         self.publish(MailEvent::ThreadPageLoaded {
             request_id: job.request_id,
@@ -115,7 +116,7 @@ impl MailCoordinator {
             self.state.mailbox_reads.cancel_pending(&account_id);
             self.publish(MailEvent::MailboxReloaded {
                 request_id,
-                result: Err("Cache reload failed.".into()),
+                result: Err(gettext("Cache reload failed.")),
             });
             return;
         };
@@ -138,7 +139,7 @@ impl MailCoordinator {
             .load_mailbox_content(selected_folder_id, conversation_limit)
             .map_err(|error| {
                 crate::logging::report_failure("mailbox-cache-reload", &error);
-                "Cache reload failed.".to_string()
+                gettext("Cache reload failed.")
             });
         self.publish(MailEvent::MailboxReloaded {
             request_id,
@@ -156,7 +157,7 @@ impl MailCoordinator {
         let Some(service) = self.service().lease_account(&account_id) else {
             self.publish(MailEvent::SearchCompleted {
                 request_id,
-                result: Err("Search unavailable.".into()),
+                result: Err(gettext("Search unavailable.")),
             });
             return;
         };
@@ -187,7 +188,7 @@ impl MailCoordinator {
             let account_id = job.service.account_id().clone();
             let result = job.service.search(&job.query).map_err(|error| {
                     crate::logging::report_failure("mail-search", &error);
-                    "Search unavailable.".to_string()
+                    gettext("Search unavailable.")
                 });
             coordinator.publish(MailEvent::SearchCompleted {
                 request_id: job.request_id,

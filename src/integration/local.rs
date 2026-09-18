@@ -8,6 +8,7 @@ use std::num::NonZeroU64;
 
 use anyhow::anyhow;
 
+use crate::i18n::gettext;
 use crate::integration::account::EdsAccountBinding;
 use crate::integration::camel::{
     AccountSession, AppendMessageRequest, MessageSyncState, TransportSession,
@@ -46,6 +47,14 @@ impl LocalFolder {
             Self::Drafts => FolderKind::Drafts,
             Self::Outbox => FolderKind::Outbox,
             Self::Sent => FolderKind::Sent,
+        }
+    }
+
+    fn display_name(self) -> String {
+        match self {
+            Self::Drafts => gettext("Drafts"),
+            Self::Outbox => gettext("Outbox"),
+            Self::Sent => gettext("Sent"),
         }
     }
 
@@ -813,7 +822,7 @@ fn ensure_projected_folder(
     }
     folders.push(MailFolder {
         id: folder_id.clone(),
-        name: folder.name().into(),
+        name: folder.display_name(),
         unread_count: 0,
         kind: folder.kind(),
     });

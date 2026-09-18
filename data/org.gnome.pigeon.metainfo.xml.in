@@ -1,4 +1,5 @@
 <?xml version="1.0" encoding="UTF-8"?>
+<!-- Translations are merged from po/ when the application is installed. -->
 <component type="desktop-application">
   <id>org.gnome.pigeon</id>
   <name>Pigeon Mail</name>
@@ -31,6 +32,11 @@
   </categories>
   <content_rating type="oars-1.1"/>
   <releases>
+    <release version="0.2.1" date="2026-09-18">
+      <description>
+        <p>Add five translations, align attachment interfaces across reading and composition, and refine localized mail dates and close confirmations.</p>
+      </description>
+    </release>
     <release version="0.2.0" date="2026-09-17">
       <description>
         <p>Rework account identities around EDS, make local mailboxes the cache-first drafts and delivery boundary, and refine the adaptive mailbox, composer, and settings interfaces.</p>

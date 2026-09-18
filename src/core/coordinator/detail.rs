@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 
 use crate::core::mail::AccountMailService;
+use crate::i18n::gettext;
 use crate::model::account::MailAccountId;
 use crate::model::event::{MailEvent, RequestId};
 use crate::model::mail::{ConversationId, MessageDetail};
@@ -103,7 +104,7 @@ impl MailCoordinator {
             self.state.message_details.cancel(&account_id);
             self.publish(MailEvent::MessageDetailLoaded {
                 request_id,
-                result: Err("Message unavailable.".into()),
+                result: Err(gettext("Message unavailable.")),
             });
             return;
         };
@@ -159,7 +160,7 @@ impl MailCoordinator {
                 if self.state.message_details.complete_current(&job) {
                     self.publish(MailEvent::MessageDetailLoaded {
                         request_id: job.request_id,
-                        result: Err("Message unavailable.".to_string()),
+                        result: Err(gettext("Message unavailable.")),
                     });
                 }
                 return;
@@ -182,7 +183,7 @@ impl MailCoordinator {
                 let result = load_message_detail(&job.service, &job.conversation_id)
                     .map_err(|error| {
                         crate::logging::report_failure("message-detail-load", &error);
-                        "Message unavailable.".to_string()
+                        gettext("Message unavailable.")
                     });
                 if coordinator.state.message_details.complete_current(&job) {
                     coordinator.publish(MailEvent::MessageDetailLoaded {

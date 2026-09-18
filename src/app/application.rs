@@ -277,7 +277,7 @@ mod tests {
 
     #[test]
     fn desktop_compose_and_dbus_service_match_application_actions() {
-        let desktop_entry = include_str!("../../data/org.gnome.pigeon.desktop");
+        let desktop_entry = include_str!("../../data/org.gnome.pigeon.desktop.in");
         let service = include_str!("../../data/org.gnome.pigeon.service.in");
         let action_group = format!("[Desktop Action {}]", crate::config::ACTION_COMPOSE);
 

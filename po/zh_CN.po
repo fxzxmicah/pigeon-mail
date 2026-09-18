@@ -1,0 +1,584 @@
+msgid ""
+msgstr ""
+"Project-Id-Version: Pigeon Mail 0.2.1\n"
+"Report-Msgid-Bugs-To: https://github.com/fxzxmicah/pigeon-mail/issues\n"
+"POT-Creation-Date: 2026-09-18 00:00+0000\n"
+"PO-Revision-Date: 2026-09-18 00:00+0000\n"
+"Last-Translator: Pigeon Mail contributors\n"
+"Language-Team: Simplified Chinese\n"
+"Language: zh_CN\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+
+
+msgid "(No subject)"
+msgstr "（无主题）"
+
+msgid "(No subject) ({count})"
+msgstr "（无主题）({count})"
+
+msgid "About"
+msgstr "关于"
+
+msgid "Account _Name"
+msgstr "账户名称(_N)"
+
+msgid "Account name is empty."
+msgstr "账户名称为空。"
+
+msgid "Actions"
+msgstr "操作"
+
+msgid "Add"
+msgstr "添加"
+
+msgid "Add Alias"
+msgstr "添加别名"
+
+msgid "Add attachments"
+msgstr "添加附件"
+
+msgid "Alias not changed."
+msgstr "别名未更改。"
+
+msgid "Aliases"
+msgstr "别名"
+
+msgid "Apply"
+msgstr "应用"
+
+msgid "Archive"
+msgstr "归档"
+
+msgid "Archived"
+msgstr "已归档"
+
+msgid "Attach"
+msgstr "附加"
+
+msgid "Attachment"
+msgstr "附件"
+
+msgid "Attachment unavailable."
+msgstr "附件不可用。"
+
+msgid "Attachments"
+msgstr "附件"
+
+msgid "Authentication failed"
+msgstr "认证失败"
+
+msgid "Back"
+msgstr "返回"
+
+msgid "Back to mailbox"
+msgstr "返回邮箱"
+
+msgid "Bcc recipients"
+msgstr "密送收件人"
+
+msgid "Bold"
+msgstr "粗体"
+
+msgid "Bulleted list"
+msgstr "项目符号列表"
+
+msgid "Cache reload failed."
+msgstr "缓存重新加载失败。"
+
+msgid "Cache unavailable"
+msgstr "缓存不可用"
+
+msgid "Cancel"
+msgstr "取消"
+
+msgid "Cc recipients"
+msgstr "抄送收件人"
+
+msgid "Cc/Bcc"
+msgstr "抄送/密送"
+
+msgid "Cc: {recipients}"
+msgstr "抄送：{recipients}"
+
+msgid "Change not saved."
+msgstr "更改未保存。"
+
+msgid "Changes not saved."
+msgstr "更改未保存。"
+
+msgid "Close"
+msgstr "关闭"
+
+msgid "Compose"
+msgstr "写邮件"
+
+msgid "Continue Editing"
+msgstr "继续编辑"
+
+msgid "Convert"
+msgstr "转换"
+
+msgid "Copy"
+msgstr "复制"
+
+msgid "Default"
+msgstr "默认"
+
+msgid "Discard"
+msgstr "丢弃"
+
+msgid "Draft loaded"
+msgstr "草稿已加载"
+
+msgid "Draft not saved."
+msgstr "草稿未保存。"
+
+msgid "Draft ready"
+msgstr "草稿已就绪"
+
+msgid "Draft saved"
+msgstr "草稿已保存"
+
+msgid "Drafts"
+msgstr "草稿"
+
+msgid "Edit"
+msgstr "编辑"
+
+msgid "Edit Alias"
+msgstr "编辑别名"
+
+msgid "Edit Draft"
+msgstr "编辑草稿"
+
+msgid "Folder is empty."
+msgstr "文件夹为空。"
+
+msgid "Folders"
+msgstr "文件夹"
+
+msgid "Forward"
+msgstr "转发"
+
+msgid "Forward draft ready"
+msgstr "转发草稿已就绪"
+
+msgid "Forward draft saved"
+msgstr "转发草稿已保存"
+
+msgid "From: {sender}    {date}"
+msgstr "发件人：{sender}    {date}"
+
+msgid "HTML"
+msgstr "HTML"
+
+msgid "Identity unavailable"
+msgstr "身份不可用"
+
+msgid "In Trash"
+msgstr "已在废纸篓中"
+
+msgid "Inbox"
+msgstr "收件箱"
+
+msgid "Italic"
+msgstr "斜体"
+
+msgid "Link not opened."
+msgstr "链接未打开。"
+
+msgid "Loading folders…"
+msgstr "正在加载文件夹…"
+
+msgid "Loading mail"
+msgstr "正在加载邮件"
+
+msgid "Loading mail…"
+msgstr "正在加载邮件…"
+
+msgid "Loading message"
+msgstr "正在加载邮件"
+
+msgid "Loading messages"
+msgstr "正在加载邮件"
+
+msgid "Local cache has no matches."
+msgstr "本地缓存中没有匹配项。"
+
+msgid "Mail Settings"
+msgstr "邮件设置"
+
+msgid "Mail link unavailable."
+msgstr "邮件链接不可用。"
+
+msgid "Mail unavailable"
+msgstr "邮件不可用"
+
+msgid "Mailbox"
+msgstr "邮箱"
+
+msgid "Mark Read"
+msgstr "标为已读"
+
+msgid "Mark Unread"
+msgstr "标为未读"
+
+msgid "Message"
+msgstr "正文"
+
+msgid "Message not converted"
+msgstr "正文未转换"
+
+msgid "Message not sent."
+msgstr "邮件未发送。"
+
+msgid "Message unavailable"
+msgstr "邮件不可用"
+
+msgid "Message unavailable."
+msgstr "邮件不可用。"
+
+msgid "Messages"
+msgstr "邮件"
+
+msgid "Messages unavailable"
+msgstr "邮件不可用"
+
+msgid "Messages unavailable."
+msgstr "邮件不可用。"
+
+msgid "Modified"
+msgstr "已修改"
+
+msgid "More headers"
+msgstr "更多邮件头"
+
+msgid "Move to Trash"
+msgstr "移至废纸篓"
+
+msgid "New Message"
+msgstr "新邮件"
+
+msgid "New mail"
+msgstr "新邮件"
+
+msgid "No attachments"
+msgstr "无附件"
+
+msgid "No mail account"
+msgstr "没有邮件账户"
+
+msgid "No matches"
+msgstr "没有匹配项"
+
+msgid "No message selected"
+msgstr "未选择邮件"
+
+msgid "No messages"
+msgstr "没有邮件"
+
+msgid "Not opened: {attachment}"
+msgstr "未打开：{attachment}"
+
+msgid "Not saved"
+msgstr "未保存"
+
+msgid "Not saved: {attachment}"
+msgstr "未保存：{attachment}"
+
+msgid "Not sent"
+msgstr "未发送"
+
+msgid "Numbered list"
+msgstr "编号列表"
+
+msgid "Offline"
+msgstr "离线"
+
+msgid "Open"
+msgstr "打开"
+
+msgid "Open Draft"
+msgstr "打开草稿"
+
+msgid "Opening local cache…"
+msgstr "正在打开本地缓存…"
+
+msgid "Opening {attachment}"
+msgstr "正在打开 {attachment}"
+
+msgid "Optional Reply-To"
+msgstr "可选回复地址"
+
+msgid "Outbox"
+msgstr "发件箱"
+
+msgid "Pigeon Mail contributors"
+msgstr "Pigeon Mail 贡献者"
+
+msgid "Queued"
+msgstr "已排队"
+
+msgid "Reading the local mail cache…"
+msgstr "正在读取本地邮件缓存…"
+
+msgid "Recipients"
+msgstr "收件人"
+
+msgid "Refresh current account"
+msgstr "刷新当前账户"
+
+msgid "Refresh unavailable"
+msgstr "刷新不可用"
+
+msgid "Remove"
+msgstr "移除"
+
+msgid "Reply"
+msgstr "回复"
+
+msgid "Reply All"
+msgstr "全部回复"
+
+msgid "Reply draft ready"
+msgstr "回复草稿已就绪"
+
+msgid "Reply draft saved"
+msgstr "回复草稿已保存"
+
+msgid "Reply-To: {address}"
+msgstr "回复地址：{address}"
+
+msgid "Reply-all draft ready"
+msgstr "全部回复草稿已就绪"
+
+msgid "Reply-all draft saved"
+msgstr "全部回复草稿已保存"
+
+msgid "Save"
+msgstr "保存"
+
+msgid "Save As"
+msgstr "另存为"
+
+msgid "Save Draft"
+msgstr "保存草稿"
+
+msgid "Save attachment"
+msgstr "保存附件"
+
+msgid "Saved {attachment}"
+msgstr "已保存 {attachment}"
+
+msgid "Saving…"
+msgstr "正在保存…"
+
+msgid "Search"
+msgstr "搜索"
+
+msgid "Search current account"
+msgstr "搜索当前账户"
+
+msgid "Search results for “{query}”"
+msgstr "“{query}”的搜索结果"
+
+msgid "Search unavailable."
+msgstr "搜索不可用。"
+
+msgid "Searching local cache…"
+msgstr "正在搜索本地缓存…"
+
+msgid "Searching mail"
+msgstr "正在搜索邮件"
+
+msgid "Select All"
+msgstr "全选"
+
+msgid "Select a message to read it."
+msgstr "选择一封邮件以阅读。"
+
+msgid "Send"
+msgstr "发送"
+
+msgid "Sending…"
+msgstr "正在发送…"
+
+msgid "Sent"
+msgstr "已发送"
+
+msgid "Set Default"
+msgstr "设为默认"
+
+msgid "Signature"
+msgstr "签名"
+
+msgid "Signature not converted."
+msgstr "签名未转换。"
+
+msgid "Star"
+msgstr "加星标"
+
+msgid "Starred"
+msgstr "已加星标"
+
+msgid "Strikethrough"
+msgstr "删除线"
+
+msgid "Subject"
+msgstr "主题"
+
+msgid "Switching account…"
+msgstr "正在切换账户…"
+
+msgid "Tasks still pending"
+msgstr "仍有任务待完成"
+
+msgid "Text"
+msgstr "纯文本"
+
+msgid "The current message has unsaved changes."
+msgstr "当前邮件有未保存的更改。"
+
+msgid "To: {recipients}"
+msgstr "收件人：{recipients}"
+
+msgid "Trash"
+msgstr "废纸篓"
+
+msgid "Underline"
+msgstr "下划线"
+
+msgid "Unknown sender"
+msgstr "未知发件人"
+
+msgid "Unsaved draft"
+msgstr "未保存的草稿"
+
+msgid "Unstar"
+msgstr "取消星标"
+
+msgid "_Address"
+msgstr "地址(_A)"
+
+msgid "_Bcc"
+msgstr "密送(_B)"
+
+msgid "_Cc"
+msgstr "抄送(_C)"
+
+msgid "_From"
+msgstr "发件人(_F)"
+
+msgid "_Name"
+msgstr "名称(_N)"
+
+msgid "_Reply-To"
+msgstr "回复地址(_R)"
+
+msgid "_Subject"
+msgstr "主题(_S)"
+
+msgid "_To"
+msgstr "收件人(_T)"
+
+msgid "mail account"
+msgstr "邮件账户"
+
+msgid "{subject} ({count})"
+msgstr "{subject}（{count}）"
+
+msgid "© 2026 Pigeon Mail contributors"
+msgstr "© 2026 Pigeon Mail 贡献者"
+
+msgid "A GNOME mail client powered by Evolution Data Server."
+msgstr "由 Evolution Data Server 驱动的 GNOME 邮件客户端。"
+
+msgid "Closing now will discard {count} pending task."
+msgid_plural "Closing now will discard {count} pending tasks."
+msgstr[0] "立即关闭将丢弃 {count} 个待完成任务。"
+
+msgid "{count} new conversation in {folder} — {account}"
+msgid_plural "{count} new conversations in {folder} — {account}"
+msgstr[0] "{folder} 中有 {count} 个新会话 — {account}"
+
+msgid "{count} task pending"
+msgid_plural "{count} tasks pending"
+msgstr[0] "有 {count} 个任务待完成"
+
+msgid "Email Client"
+msgstr "邮件客户端"
+
+msgid "Read and send email"
+msgstr "阅读和发送电子邮件"
+
+msgid "mail;email;inbox;message;"
+msgstr "mail;email;inbox;message;邮件;邮箱;收件箱;消息;"
+
+msgid "Compose New Message"
+msgstr "撰写新邮件"
+
+msgid "Read and send email on GNOME"
+msgstr "在 GNOME 上阅读和发送电子邮件"
+
+msgid "Pigeon Mail is a GNOME email client using GNOME Online Accounts and Evolution Data Server for accounts, offline mail storage, and delivery."
+msgstr "Pigeon Mail 是一款 GNOME 邮件客户端，使用 GNOME 在线账户和 Evolution Data Server 管理账户、离线邮件存储与投递。"
+
+msgid "It supports HTML mail, sending identities, attachments, drafts, search, and cache-first message actions."
+msgstr "它支持 HTML 邮件、发信身份、附件、草稿、搜索以及缓存优先的邮件操作。"
+
+msgid "No usable mail account is currently available."
+msgstr "当前没有可用的邮件账户。"
+
+msgid "Account discovery or the mail service may be unavailable."
+msgstr "账户发现或邮件服务可能不可用。"
+
+msgid "Mail account unavailable"
+msgstr "邮件账户不可用"
+
+msgid "Explore the three-pane mailbox"
+msgstr "探索三栏邮箱"
+
+msgid "Use the folder list, message list, and reading pane with the mouse or keyboard."
+msgstr "使用鼠标或键盘操作文件夹列表、邮件列表和阅读窗格。"
+
+msgid "Use Up and Down inside a list, and Left and Right to move between the folder list, message list, and reading pane. Activating a message opens it; focus and selection remain useful visual indicators."
+msgstr "在列表中使用上、下方向键，并使用左、右方向键在文件夹列表、邮件列表和阅读窗格之间移动。激活邮件即可打开；焦点和选中状态仍可作为有效的视觉提示。"
+
+msgid "Add five translations, align attachment interfaces across reading and composition, and refine localized mail dates and close confirmations."
+msgstr "新增五种语言翻译，统一阅读与写作界面的附件设计，并改进本地化邮件日期和关闭确认。"
+
+msgid "Rework account identities around EDS, make local mailboxes the cache-first drafts and delivery boundary, and refine the adaptive mailbox, composer, and settings interfaces."
+msgstr "围绕 EDS 重构账户身份，将本地邮箱作为缓存优先的草稿与投递边界，并改进邮箱、写信和设置的自适应界面。"
+
+msgid "Keep cached message switching responsive during downloads and document the Microsoft 365 alias transport fix."
+msgstr "保持下载期间切换缓存邮件的响应速度，并记录 Microsoft 365 别名传输修复。"
+
+msgid "Improve account refresh and recovery, composition state handling, and asynchronous attachment saving."
+msgstr "改进账户刷新与恢复、写信状态处理和附件异步保存。"
+
+msgid "Notify from every mail folder, open the real source folder, and improve cached mailbox consistency."
+msgstr "从所有邮件文件夹发送通知、打开真实来源文件夹，并改进缓存邮箱的一致性。"
+
+msgid "Fix desktop Compose activation, mailto URI handling, and stub composition."
+msgstr "修复桌面写信激活、mailto URI 处理和占位账户写信。"
+
+msgid "Date"
+msgstr "日期"
+
+msgid "Unknown date"
+msgstr "日期未知"
+
+msgid "Forwarded message"
+msgstr "转发的邮件"
+
+msgid "From"
+msgstr "发件人"
+
+msgid "On {date}, {sender} wrote:"
+msgstr "{sender} 于 {date} 写道："
+
+msgid "To"
+msgstr "收件人"

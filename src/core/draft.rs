@@ -1,3 +1,4 @@
+use crate::i18n::{format_datetime, gettext, gettext_f};
 use crate::model::account::{MailAccountId, SendingIdentity, Signature};
 use crate::model::address::normalized_mailbox_address;
 use crate::model::mail::{escape_html_text, plain_text_to_html};
@@ -47,7 +48,7 @@ pub fn create_reply_draft(
             .unwrap_or(&message.from)
             .clone(),
     ];
-    draft.subject = prefixed_subject("Re:", &message.subject);
+    draft.subject = prefixed_subject("Re:", &display_subject(message));
     set_body_with_signature(
         &mut draft,
         "",
@@ -203,43 +204,81 @@ fn prefixed_subject(prefix: &str, subject: &str) -> String {
 }
 
 fn quoted_reply_text(message: &MessageDetail) -> String {
+    let sender = display_sender(message);
+    let date = format_datetime(message.date_unix_secs);
+    let attribution = gettext_f(
+        "On {date}, {sender} wrote:",
+        &[("date", &date), ("sender", &sender)],
+    );
     format!(
-        "On {}, {} wrote:\n> {}",
-        message.date_label,
-        message.from,
+        "{attribution}\n> {}",
         message.body.presentation_text().replace('\n', "\n> ")
     )
 }
 
 fn quoted_reply_html(message: &MessageDetail) -> String {
+    let sender = escape_html_text(&display_sender(message));
+    let date = escape_html_text(&format_datetime(message.date_unix_secs));
+    let attribution = gettext_f(
+        "On {date}, {sender} wrote:",
+        &[("date", &date), ("sender", &sender)],
+    );
     format!(
-        "<blockquote><p><b>On {}</b>, {} wrote:</p>{}</blockquote>",
-        escape_html_text(&message.date_label),
-        escape_html_text(&message.from),
+        "<blockquote><p><b>{attribution}</b></p>{}</blockquote>",
         message.body.presentation_html()
     )
 }
 
 fn forwarded_text(message: &MessageDetail) -> String {
+    let heading = gettext("Forwarded message");
+    let from = gettext("From");
+    let date = gettext("Date");
+    let to = gettext("To");
+    let subject = gettext("Subject");
+    let message_sender = display_sender(message);
+    let message_subject = display_subject(message);
+    let message_date = format_datetime(message.date_unix_secs);
     format!(
-        "---------- Forwarded message ----------\nFrom: {}\nDate: {}\nTo: {}\nSubject: {}\n\n{}",
-        message.from,
-        message.date_label,
+        "---------- {heading} ----------\n{from}: {}\n{date}: {message_date}\n{to}: {}\n{subject}: {}\n\n{}",
+        message_sender,
         message.to.join(", "),
-        message.subject,
+        message_subject,
         message.body.presentation_text()
     )
 }
 
 fn forwarded_html(message: &MessageDetail) -> String {
+    let heading = gettext("Forwarded message");
+    let from = gettext("From");
+    let date = gettext("Date");
+    let to = gettext("To");
+    let subject = gettext("Subject");
+    let message_sender = display_sender(message);
+    let message_subject = display_subject(message);
+    let message_date = escape_html_text(&format_datetime(message.date_unix_secs));
     format!(
-        "<p>---------- Forwarded message ----------</p><p><b>From:</b> {}<br><b>Date:</b> {}<br><b>To:</b> {}<br><b>Subject:</b> {}</p>{}",
-        escape_html_text(&message.from),
-        escape_html_text(&message.date_label),
+        "<p>---------- {heading} ----------</p><p><b>{from}:</b> {}<br><b>{date}:</b> {message_date}<br><b>{to}:</b> {}<br><b>{subject}:</b> {}</p>{}",
+        escape_html_text(&message_sender),
         escape_html_text(&message.to.join(", ")),
-        escape_html_text(&message.subject),
+        escape_html_text(&message_subject),
         message.body.presentation_html()
     )
+}
+
+fn display_sender(message: &MessageDetail) -> String {
+    if message.from.trim().is_empty() {
+        gettext("Unknown sender")
+    } else {
+        message.from.clone()
+    }
+}
+
+fn display_subject(message: &MessageDetail) -> String {
+    if message.subject.trim().is_empty() {
+        gettext("(No subject)")
+    } else {
+        message.subject.clone()
+    }
 }
 
 #[cfg(test)]
@@ -272,7 +311,7 @@ mod tests {
             cc: vec!["other@example.com".into(), "third@example.com".into()],
             bcc: Vec::new(),
             reply_to: None,
-            date_label: "Today & tomorrow".into(),
+            date_unix_secs: 1_725_811_200,
             starred: false,
             unread: false,
             attachments: Vec::new(),
@@ -545,7 +584,7 @@ mod tests {
         let reply = quoted_reply_html(&message());
         let forwarded = forwarded_html(&message());
 
-        assert!(reply.contains("Today &amp; tomorrow"));
+        assert!(reply.contains("Sender &lt;sender@example.com&gt;"));
         assert!(forwarded.contains("Subject &lt;unsafe&gt;"));
         assert!(reply.contains("<p>Body</p>"));
         assert!(forwarded.contains("<p>Body</p>"));

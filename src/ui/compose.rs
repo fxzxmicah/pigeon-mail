@@ -6,6 +6,7 @@ use std::rc::Rc;
 
 use crate::core::coordinator::MailCoordinator;
 use crate::core::draft;
+use crate::i18n::gettext;
 use crate::integration::webkit::{ComposerContent, WebKitComposer};
 use crate::model::account::{MailAccount, MailAccountId, SendingIdentity};
 use crate::model::address::{normalized_mailbox_address, split_mailbox_list};
@@ -13,6 +14,7 @@ use crate::model::mail::{
     AttachmentInfo, AttachmentLocation, AttachmentOperation, AttachmentSource, DraftMessage,
     MailtoRequest, TextRange,
 };
+use crate::ui::attachment;
 
 use super::editor::DualFormatEditor;
 use super::mailbox::MailboxViewModel;
@@ -41,17 +43,24 @@ enum ComposeActivity {
 }
 
 impl ComposeOperation {
-    fn progress_status(self) -> &'static str {
+    fn progress_status(self) -> String {
         match self {
-            Self::SaveDraft => "Saving…",
-            Self::Send => "Sending…",
+            Self::SaveDraft => gettext("Saving…"),
+            Self::Send => gettext("Sending…"),
         }
     }
 
-    fn failure_status(self) -> &'static str {
+    fn failure_status(self) -> String {
         match self {
-            Self::SaveDraft => "Not saved",
-            Self::Send => "Not sent",
+            Self::SaveDraft => gettext("Not saved"),
+            Self::Send => gettext("Not sent"),
+        }
+    }
+
+    fn capture_failure(self) -> String {
+        match self {
+            Self::SaveDraft => gettext("Draft not saved."),
+            Self::Send => gettext("Message not sent."),
         }
     }
 }
@@ -137,32 +146,32 @@ impl ComposeViewModel {
         (identity, modified)
     }
 
-    pub fn title(&self) -> &'static str {
+    pub fn title(&self) -> String {
         match self.kind {
-            ComposeKind::New => "New Message",
-            ComposeKind::EditDraft => "Edit Draft",
-            ComposeKind::Reply => "Reply",
-            ComposeKind::ReplyAll => "Reply All",
-            ComposeKind::Forward => "Forward",
+            ComposeKind::New => gettext("New Message"),
+            ComposeKind::EditDraft => gettext("Edit Draft"),
+            ComposeKind::Reply => gettext("Reply"),
+            ComposeKind::ReplyAll => gettext("Reply All"),
+            ComposeKind::Forward => gettext("Forward"),
         }
     }
 
-    pub fn initial_status(&self) -> &'static str {
+    pub fn initial_status(&self) -> String {
         match self.kind {
-            ComposeKind::New => "Draft ready",
-            ComposeKind::EditDraft => "Draft loaded",
-            ComposeKind::Reply => "Reply draft ready",
-            ComposeKind::ReplyAll => "Reply-all draft ready",
-            ComposeKind::Forward => "Forward draft ready",
+            ComposeKind::New => gettext("Draft ready"),
+            ComposeKind::EditDraft => gettext("Draft loaded"),
+            ComposeKind::Reply => gettext("Reply draft ready"),
+            ComposeKind::ReplyAll => gettext("Reply-all draft ready"),
+            ComposeKind::Forward => gettext("Forward draft ready"),
         }
     }
 
-    pub fn saved_status(&self) -> &'static str {
+    pub fn saved_status(&self) -> String {
         match self.kind {
-            ComposeKind::New | ComposeKind::EditDraft => "Draft saved",
-            ComposeKind::Reply => "Reply draft saved",
-            ComposeKind::ReplyAll => "Reply-all draft saved",
-            ComposeKind::Forward => "Forward draft saved",
+            ComposeKind::New | ComposeKind::EditDraft => gettext("Draft saved"),
+            ComposeKind::Reply => gettext("Reply draft saved"),
+            ComposeKind::ReplyAll => gettext("Reply-all draft saved"),
+            ComposeKind::Forward => gettext("Forward draft saved"),
         }
     }
 }
@@ -170,6 +179,10 @@ impl ComposeViewModel {
 enum NavigationRequest {
     Mailbox(Option<Box<dyn FnOnce()>>),
     Compose(ComposeViewModel),
+    Close {
+        proceed: Box<dyn FnOnce()>,
+        cancel: Box<dyn FnOnce()>,
+    },
 }
 
 #[derive(Clone)]
@@ -206,11 +219,6 @@ struct ComposePageInner {
     subject_entry: gtk::Entry,
     optional_recipients_button: gtk::ToggleButton,
     attachment_list: gtk::ListBox,
-    attachment_scroller: gtk::ScrolledWindow,
-    attachment_frame: gtk::Frame,
-    attachments_label: gtk::Label,
-    open_attachment_button: gtk::Button,
-    remove_attachment_button: gtk::Button,
 }
 
 impl ComposePage {
@@ -228,7 +236,7 @@ impl ComposePage {
             convert_button: convert_body_button,
             mode_controls: body_mode_controls,
             frame: body_frame,
-        } = DualFormatEditor::new("Message");
+        } = DualFormatEditor::new(&gettext("Message"));
         body_frame.set_height_request(360);
         let body_section = gtk::Box::builder()
             .orientation(gtk::Orientation::Vertical)
@@ -238,26 +246,26 @@ impl ComposePage {
         body_section.append(&body_mode_controls);
         body_section.append(&body_frame);
         let title = adw::WindowTitle::builder()
-            .title("New Message")
-            .subtitle("Draft ready")
+            .title(gettext("New Message"))
+            .subtitle(gettext("Draft ready"))
             .build();
         let back_button = gtk::Button::builder()
             .icon_name("go-previous-symbolic")
-            .tooltip_text("Back to mailbox")
+            .tooltip_text(gettext("Back to mailbox"))
             .build();
-        let save_button = gtk::Button::builder().label("Save Draft").build();
+        let save_button = gtk::Button::builder().label(gettext("Save Draft")).build();
         let send_button = gtk::Button::builder()
-            .label("Send")
+            .label(gettext("Send"))
             .css_classes(["suggested-action"])
             .build();
         let identity_dropdown =
             gtk::DropDown::new(None::<gtk::StringList>, None::<gtk::Expression>);
-        let to_entry = entry("Recipients");
-        let cc_entry = entry("Cc recipients");
-        let bcc_entry = entry("Bcc recipients");
-        let subject_entry = entry("Subject");
+        let to_entry = entry(&gettext("Recipients"));
+        let cc_entry = entry(&gettext("Cc recipients"));
+        let bcc_entry = entry(&gettext("Bcc recipients"));
+        let subject_entry = entry(&gettext("Subject"));
         let optional_recipients_button = gtk::ToggleButton::builder()
-            .label("Cc/Bcc")
+            .label(gettext("Cc/Bcc"))
             .valign(gtk::Align::Center)
             .build();
 
@@ -266,9 +274,9 @@ impl ComposePage {
             .row_spacing(8)
             .column_spacing(12)
             .build();
-        form_grid.attach(&form_label("_From", &identity_dropdown), 0, 0, 1, 1);
+        form_grid.attach(&form_label(&gettext("_From"), &identity_dropdown), 0, 0, 1, 1);
         form_grid.attach(&identity_dropdown, 1, 0, 1, 1);
-        form_grid.attach(&form_label("_To", &to_entry), 0, 1, 1, 1);
+        form_grid.attach(&form_label(&gettext("_To"), &to_entry), 0, 1, 1, 1);
         form_grid.attach(&to_entry, 1, 1, 1, 1);
         form_grid.attach(&optional_recipients_button, 2, 1, 1, 1);
 
@@ -277,9 +285,9 @@ impl ComposePage {
             .row_spacing(8)
             .column_spacing(12)
             .build();
-        optional_fields.attach(&form_label("_Cc", &cc_entry), 0, 0, 1, 1);
+        optional_fields.attach(&form_label(&gettext("_Cc"), &cc_entry), 0, 0, 1, 1);
         optional_fields.attach(&cc_entry, 1, 0, 1, 1);
-        optional_fields.attach(&form_label("_Bcc", &bcc_entry), 0, 1, 1, 1);
+        optional_fields.attach(&form_label(&gettext("_Bcc"), &bcc_entry), 0, 1, 1, 1);
         optional_fields.attach(&bcc_entry, 1, 1, 1, 1);
         let optional_recipients = gtk::Revealer::builder()
             .transition_type(gtk::RevealerTransitionType::SlideDown)
@@ -291,41 +299,18 @@ impl ComposePage {
         });
 
         let subject_row = gtk::Box::builder().spacing(12).build();
-        subject_row.append(&form_label("_Subject", &subject_entry));
+        subject_row.append(&form_label(&gettext("_Subject"), &subject_entry));
         subject_row.append(&subject_entry);
-        let attachment_list = gtk::ListBox::builder().css_classes(["boxed-list"]).build();
-        let attachment_scroller = gtk::ScrolledWindow::builder()
-            .hscrollbar_policy(gtk::PolicyType::Never)
-            .propagate_natural_height(true)
-            .max_content_height(160)
-            .child(&attachment_list)
+        let attachment_list = gtk::ListBox::builder()
+            .selection_mode(gtk::SelectionMode::None)
+            .show_separators(true)
             .build();
+        let attachment_viewport = attachment::viewport(&attachment_list);
         let attachment_frame = gtk::Frame::builder()
+            .label(gettext("Attachments"))
             .css_classes(["compact-list-frame"])
-            .child(&attachment_scroller)
-            .visible(false)
+            .child(&attachment_viewport)
             .build();
-        let attachments_label = gtk::Label::builder()
-            .xalign(0.0)
-            .css_classes(["heading"])
-            .label("Attachments")
-            .build();
-        let add_attachment_button = gtk::Button::builder().label("Add").build();
-        let open_attachment_button = gtk::Button::builder()
-            .label("Open")
-            .sensitive(false)
-            .build();
-        let remove_attachment_button = gtk::Button::builder()
-            .label("Remove")
-            .sensitive(false)
-            .build();
-        let attachment_actions = adw::WrapBox::builder()
-            .child_spacing(12)
-            .line_spacing(8)
-            .build();
-        attachment_actions.append(&add_attachment_button);
-        attachment_actions.append(&open_attachment_button);
-        attachment_actions.append(&remove_attachment_button);
 
         let content = gtk::Box::builder()
             .orientation(gtk::Orientation::Vertical)
@@ -339,9 +324,7 @@ impl ComposePage {
         content.append(&optional_recipients);
         content.append(&subject_row);
         content.append(&body_section);
-        content.append(&attachments_label);
         content.append(&attachment_frame);
-        content.append(&attachment_actions);
         let root = gtk::ScrolledWindow::builder()
             .hscrollbar_policy(gtk::PolicyType::Never)
             .child(&content)
@@ -377,14 +360,9 @@ impl ComposePage {
                 subject_entry,
                 optional_recipients_button,
                 attachment_list,
-                attachment_scroller,
-                attachment_frame,
-                attachments_label,
-                open_attachment_button,
-                remove_attachment_button,
             }),
         };
-        page.connect_signals(add_attachment_button);
+        page.connect_signals();
         page
     }
 
@@ -429,6 +407,17 @@ impl ComposePage {
         self.request_navigation(NavigationRequest::Mailbox(Some(Box::new(completed))));
     }
 
+    pub fn request_close(
+        &self,
+        proceed: impl FnOnce() + 'static,
+        cancel: impl FnOnce() + 'static,
+    ) {
+        self.request_navigation(NavigationRequest::Close {
+            proceed: Box::new(proceed),
+            cancel: Box::new(cancel),
+        });
+    }
+
     pub fn account_activation_started(&self) {
         if self.is_visible() {
             self.sync_editor_content();
@@ -438,7 +427,7 @@ impl ComposePage {
                 self.inner.activity.get(),
                 ComposeActivity::PreparingWrite(_) | ComposeActivity::Writing(_)
             ) {
-                self.inner.title.set_subtitle("Switching account…");
+                self.inner.title.set_subtitle(&gettext("Switching account…"));
             }
         }
     }
@@ -455,7 +444,7 @@ impl ComposePage {
         self.request_next_navigation();
     }
 
-    fn connect_signals(&self, add_attachment_button: gtk::Button) {
+    fn connect_signals(&self) {
         let page = self.clone();
         self.inner
             .back_button
@@ -494,32 +483,14 @@ impl ComposePage {
         self.inner
             .identity_dropdown
             .connect_selected_notify(move |dropdown| page.identity_changed(dropdown.selected()));
-        let open = self.inner.open_attachment_button.clone();
-        let remove = self.inner.remove_attachment_button.clone();
-        self.inner
-            .attachment_list
-            .connect_row_selected(move |_, row| {
-                open.set_sensitive(row.is_some());
-                remove.set_sensitive(row.is_some());
-            });
-        let page = self.clone();
-        add_attachment_button.connect_clicked(move |_| page.add_attachments());
-        let page = self.clone();
-        self.inner
-            .open_attachment_button
-            .connect_clicked(move |_| page.open_selected_attachment());
-        let page = self.clone();
-        self.inner
-            .remove_attachment_button
-            .connect_clicked(move |_| page.remove_selected_attachment());
     }
 
     fn show_model(&self, model: ComposeViewModel) {
         self.inner.updating_widgets.set(true);
         self.inner.account_rebind_pending.set(false);
-        self.inner.title.set_title(model.title());
-        self.inner.title.set_subtitle(if model.dirty {
-            "Modified"
+        self.inner.title.set_title(&model.title());
+        self.inner.title.set_subtitle(&if model.dirty {
+            gettext("Modified")
         } else {
             model.initial_status()
         });
@@ -545,7 +516,7 @@ impl ComposePage {
         );
         *self.inner.model.borrow_mut() = Some(model);
         self.set_identity_model();
-        self.refresh_attachments(Some(0));
+        self.refresh_attachments(None);
         self.set_busy(false);
         self.inner.updating_widgets.set(false);
         self.inner.page_stack.set_visible_child_name("compose");
@@ -566,22 +537,13 @@ impl ComposePage {
             return;
         }
         let dialog = adw::AlertDialog::builder()
-            .heading("Unsaved draft")
-            .body("The current message has unsaved changes.")
+            .heading(gettext("Unsaved draft"))
+            .body(gettext("The current message has unsaved changes."))
             .build();
-        let can_save = self.write_available();
-        dialog.add_responses(&[
-            ("continue", "Continue Editing"),
-            ("discard", "Discard"),
-        ]);
+        dialog.add_response("continue", &gettext("Continue Editing"));
+        dialog.add_response("discard", &gettext("Discard"));
         dialog.set_response_appearance("discard", adw::ResponseAppearance::Destructive);
-        if can_save {
-            dialog.add_response("save", "Save Draft");
-            dialog.set_response_appearance("save", adw::ResponseAppearance::Suggested);
-            dialog.set_default_response(Some("save"));
-        } else {
-            dialog.set_default_response(Some("continue"));
-        }
+        dialog.set_default_response(Some("continue"));
         dialog.set_close_response("continue");
         self.inner.navigation_dialog_open.set(true);
         let page = self.clone();
@@ -592,14 +554,7 @@ impl ComposePage {
                 page.inner.navigation_dialog_open.set(false);
                 match response.as_str() {
                     "discard" => page.perform_navigation(navigation),
-                    "save" if can_save && page.write_available() => {
-                        page.inner
-                            .navigation_queue
-                            .borrow_mut()
-                            .push_front(navigation);
-                        page.start_save();
-                    }
-                    _ => page.request_next_navigation(),
+                    _ => page.cancel_navigation(navigation),
                 }
             },
         );
@@ -634,6 +589,17 @@ impl ComposePage {
                 }
             }
             NavigationRequest::Compose(model) => self.show_model(model),
+            NavigationRequest::Close { proceed, .. } => {
+                proceed();
+                return;
+            }
+        }
+        self.request_next_navigation();
+    }
+
+    fn cancel_navigation(&self, navigation: NavigationRequest) {
+        if let NavigationRequest::Close { cancel, .. } = navigation {
+            cancel();
         }
         self.request_next_navigation();
     }
@@ -649,7 +615,7 @@ impl ComposePage {
             };
             model.dirty = true;
         }
-        self.inner.title.set_subtitle("Modified");
+        self.inner.title.set_subtitle(&gettext("Modified"));
     }
 
     fn entries_changed(&self) {
@@ -811,7 +777,7 @@ impl ComposePage {
             let Ok(snapshot) = snapshot else {
                 page.inner
                     .toast_overlay
-                    .add_toast(adw::Toast::new("Message not converted"));
+                    .add_toast(adw::Toast::new(&gettext("Message not converted")));
                 page.finish_account_rebind_or_enable();
                 page.request_next_navigation();
                 return;
@@ -923,7 +889,7 @@ impl ComposePage {
         self.sync_editor_content();
         let account = self.inner.mailbox.borrow().current_account().cloned();
         let Some(account) = account else {
-            self.inner.title.set_subtitle("Identity unavailable");
+            self.inner.title.set_subtitle(&gettext("Identity unavailable"));
             self.inner.account_rebind_pending.set(false);
             self.set_busy(false);
             return;
@@ -990,7 +956,7 @@ impl ComposePage {
             .activity
             .set(ComposeActivity::PreparingWrite(operation));
         self.set_busy(true);
-        self.inner.title.set_subtitle(operation.progress_status());
+        self.inner.title.set_subtitle(&operation.progress_status());
     }
 
     fn start_save(&self) {
@@ -1012,7 +978,10 @@ impl ComposePage {
                 Ok(snapshot) => {
                     page.dispatch_operation(operation, snapshot.html, text, signature_range)
                 }
-                Err(error) => page.finish_operation_failure(operation.failure_status(), error),
+                Err(()) => page.finish_operation_failure(
+                    operation.failure_status(),
+                    operation.capture_failure(),
+                ),
             });
     }
 
@@ -1079,11 +1048,14 @@ impl ComposePage {
                     model.dirty = false;
                     model.saved_status()
                 };
-                self.inner.title.set_subtitle(saved_status);
+                self.inner.title.set_subtitle(&saved_status);
                 self.finish_account_rebind_or_enable();
                 self.request_next_navigation();
             }
-            Err(error) => self.finish_operation_failure("Not saved", error),
+            Err(error) => self.finish_operation_failure(
+                ComposeOperation::SaveDraft.failure_status(),
+                error,
+            ),
         }
     }
 
@@ -1099,7 +1071,7 @@ impl ComposePage {
                 self.inner.model.borrow_mut().as_mut()
                     .expect("a completed send retains its compose model")
                     .dirty = false;
-                self.inner.title.set_subtitle("Queued");
+                self.inner.title.set_subtitle(&gettext("Queued"));
                 {
                     let mut queue = self.inner.navigation_queue.borrow_mut();
                     if queue.is_empty() {
@@ -1109,13 +1081,15 @@ impl ComposePage {
                 self.finish_account_rebind_or_enable();
                 self.request_next_navigation();
             }
-            Err(error) => self.finish_operation_failure("Not sent", error),
+            Err(error) => {
+                self.finish_operation_failure(ComposeOperation::Send.failure_status(), error)
+            }
         }
     }
 
-    fn finish_operation_failure(&self, status: &str, error: String) {
+    fn finish_operation_failure(&self, status: String, error: String) {
         self.inner.activity.set(ComposeActivity::Idle);
-        self.inner.title.set_subtitle(status);
+        self.inner.title.set_subtitle(&status);
         self.inner.toast_overlay.add_toast(adw::Toast::new(&error));
         self.resume_navigation_after_failure();
     }
@@ -1150,8 +1124,8 @@ impl ComposePage {
 
     fn add_attachments(&self) {
         let dialog = gtk::FileDialog::builder()
-            .title("Add attachments")
-            .accept_label("Attach")
+            .title(gettext("Add attachments"))
+            .accept_label(gettext("Attach"))
             .build();
         let page = self.clone();
         dialog.open_multiple(
@@ -1166,16 +1140,14 @@ impl ComposePage {
                     .filter_map(|item| item.downcast::<gio::File>().ok())
                     .map(|file| AttachmentInfo {
                         display_name: file
-                            .path()
-                            .and_then(|path| {
-                                path.file_name()
-                                    .map(|name| name.to_string_lossy().to_string())
-                            })
-                            .unwrap_or_else(|| "Attachment".into()),
+                            .basename()
+                            .map(|name| name.to_string_lossy().into_owned())
+                            .filter(|name| !name.is_empty())
+                            .unwrap_or_else(|| gettext("Attachment")),
                         location: AttachmentLocation::ExternalUri(file.uri().to_string()),
                     })
                     .collect::<Vec<_>>();
-                let selected_index = {
+                let added_index = {
                     let mut current = page.inner.model.borrow_mut();
                     let Some(model) = current.as_mut() else {
                         return;
@@ -1193,19 +1165,15 @@ impl ComposePage {
                     (draft.attachments.len() > previous_len)
                         .then_some(draft.attachments.len() - 1)
                 };
-                if let Some(selected_index) = selected_index {
-                    page.refresh_attachments(Some(selected_index));
+                if let Some(added_index) = added_index {
+                    page.refresh_attachments(Some(added_index));
                     page.mark_modified();
                 }
             },
         );
     }
 
-    fn open_selected_attachment(&self) {
-        let Some(row) = self.inner.attachment_list.selected_row() else {
-            return;
-        };
-        let index = row.index() as usize;
+    fn open_attachment(&self, index: usize) {
         let (attachment, source) = {
             let current = self.inner.model.borrow();
             let Some(model) = current.as_ref() else {
@@ -1224,11 +1192,7 @@ impl ComposePage {
         );
     }
 
-    fn remove_selected_attachment(&self) {
-        let Some(row) = self.inner.attachment_list.selected_row() else {
-            return;
-        };
-        let index = row.index() as usize;
+    fn remove_attachment(&self, index: usize) {
         let removed = self.inner.model.borrow_mut().as_mut().is_some_and(|model| {
             let draft = &mut model.draft;
             if index < draft.attachments.len() {
@@ -1247,7 +1211,7 @@ impl ComposePage {
         }
     }
 
-    fn refresh_attachments(&self, selected_index: Option<usize>) {
+    fn refresh_attachments(&self, focus_index: Option<usize>) {
         let attachments = self
             .inner
             .model
@@ -1255,26 +1219,14 @@ impl ComposePage {
             .as_ref()
             .map(|model| model.draft.attachments.clone())
             .unwrap_or_default();
-        rebuild_attachment_list(&self.inner.attachment_list, &attachments);
-        self.inner
-            .attachment_scroller
-            .set_min_content_height(attachment_viewport_height(attachments.len()));
-        self.inner
-            .attachments_label
-            .set_label(&attachment_heading(attachments.len()));
-        self.inner
-            .attachment_frame
-            .set_visible(!attachments.is_empty());
-        let selected_row = selected_index.and_then(|index| {
-            self.inner
-                .attachment_list
-                .row_at_index(i32::try_from(index).ok()?)
-        });
-        if let Some(row) = selected_row {
-            self.inner.attachment_list.select_row(Some(&row));
-        } else {
-            self.inner.open_attachment_button.set_sensitive(false);
-            self.inner.remove_attachment_button.set_sensitive(false);
+        let focus_target = rebuild_attachment_list(
+            &self.inner.attachment_list,
+            &attachments,
+            Rc::downgrade(&self.inner),
+            focus_index,
+        );
+        if let Some(target) = focus_target {
+            target.grab_focus();
         }
     }
 }
@@ -1454,50 +1406,65 @@ fn has_optional_recipients(draft: &DraftMessage) -> bool {
     !draft.cc.is_empty() || !draft.bcc.is_empty()
 }
 
-fn attachment_heading(count: usize) -> String {
-    if count == 0 {
-        "Attachments".into()
-    } else {
-        format!("Attachments ({count})")
-    }
-}
-
-fn attachment_viewport_height(count: usize) -> i32 {
-    count.min(4) as i32 * 40
-}
-
-fn rebuild_attachment_list(list: &gtk::ListBox, attachments: &[AttachmentInfo]) {
+fn rebuild_attachment_list(
+    list: &gtk::ListBox,
+    attachments: &[AttachmentInfo],
+    page: std::rc::Weak<ComposePageInner>,
+    focus_index: Option<usize>,
+) -> Option<gtk::Button> {
     list.remove_all();
-    for attachment in attachments {
-        let row = gtk::ListBoxRow::new();
-        let content = gtk::Box::builder()
-            .spacing(12)
-            .margin_top(8)
-            .margin_bottom(8)
-            .margin_start(12)
-            .margin_end(12)
+    let mut focus_target = None;
+    for (index, attachment_info) in attachments.iter().enumerate() {
+        let remove = gtk::Button::builder()
+            .label(gettext("Remove"))
+            .can_shrink(true)
+            .valign(gtk::Align::Center)
             .build();
-        let icon = gtk::Image::from_icon_name("mail-attachment-symbolic");
-        icon.add_css_class("dim-label");
-        let title = gtk::Label::builder()
-            .xalign(0.0)
-            .hexpand(true)
-            .wrap(true)
-            .label(&attachment.display_name)
-            .build();
-        content.append(&icon);
-        content.append(&title);
-        row.set_child(Some(&content));
-        row.set_activatable(false);
+        let (row, open) = attachment::row(
+            "mail-attachment-symbolic",
+            &attachment_info.display_name,
+            Some(remove.upcast_ref()),
+        );
+        let page_for_open = page.clone();
+        open.connect_clicked(move |_| {
+            if let Some(inner) = page_for_open.upgrade() {
+                ComposePage { inner }.open_attachment(index);
+            }
+        });
+        let page_for_remove = page.clone();
+        remove.connect_clicked(move |_| {
+            if let Some(inner) = page_for_remove.upgrade() {
+                ComposePage { inner }.remove_attachment(index);
+            }
+        });
+        if focus_index == Some(index) {
+            focus_target = Some(open.clone());
+        }
         list.append(&row);
     }
+
+    let (add_row, add) = attachment::row(
+        "list-add-symbolic",
+        &gettext("Add attachments"),
+        None,
+    );
+    add.connect_clicked(move |_| {
+        if let Some(inner) = page.upgrade() {
+            ComposePage { inner }.add_attachments();
+        }
+    });
+    if focus_index == Some(attachments.len()) {
+        focus_target = Some(add.clone());
+    }
+    list.append(&add_row);
+    focus_target
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        ComposeKind, ComposeViewModel, apply_identity_headers, attachment_heading,
-        has_optional_recipients, html_from_text_preserving_signature, identity_for_rebind,
+        ComposeKind, ComposeViewModel, apply_identity_headers, has_optional_recipients,
+        html_from_text_preserving_signature, identity_for_rebind,
         rebind_draft_account, text_from_html_preserving_signature,
     };
     use crate::integration::stub::stub_account;
@@ -1598,13 +1565,6 @@ mod tests {
         };
 
         assert_eq!(model.selected_identity_index(), 1);
-    }
-
-    #[test]
-    fn attachment_heading_omits_a_zero_count_but_reports_present_items() {
-        assert!(!attachment_heading(0).contains('0'));
-        assert!(attachment_heading(1).contains('1'));
-        assert!(attachment_heading(12).contains("12"));
     }
 
     #[test]

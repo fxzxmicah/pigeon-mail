@@ -1,0 +1,583 @@
+msgid ""
+msgstr ""
+"Project-Id-Version: Pigeon Mail 0.2.1\n"
+"Report-Msgid-Bugs-To: https://github.com/fxzxmicah/pigeon-mail/issues\n"
+"POT-Creation-Date: 2026-09-18 00:00+0000\n"
+"PO-Revision-Date: 2026-09-18 00:00+0000\n"
+"Last-Translator: Pigeon Mail contributors\n"
+"Language-Team: Japanese\n"
+"Language: ja\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+
+msgid "About"
+msgstr "このアプリについて"
+
+msgid "Account _Name"
+msgstr "アカウント名(_N)"
+
+msgid "Account name is empty."
+msgstr "アカウント名が空です。"
+
+msgid "Actions"
+msgstr "操作"
+
+msgid "Add"
+msgstr "追加"
+
+msgid "Add Alias"
+msgstr "エイリアスを追加"
+
+msgid "Add attachments"
+msgstr "添付ファイルを追加"
+
+msgid "Alias not changed."
+msgstr "エイリアスは変更されませんでした。"
+
+msgid "Aliases"
+msgstr "エイリアス"
+
+msgid "Apply"
+msgstr "適用"
+
+msgid "Archive"
+msgstr "アーカイブ"
+
+msgid "Archived"
+msgstr "アーカイブ済み"
+
+msgid "Attach"
+msgstr "添付"
+
+msgid "Attachment"
+msgstr "添付ファイル"
+
+msgid "Attachment unavailable."
+msgstr "添付ファイルを利用できません。"
+
+msgid "Attachments"
+msgstr "添付ファイル"
+
+msgid "Authentication failed"
+msgstr "認証に失敗しました"
+
+msgid "Back"
+msgstr "戻る"
+
+msgid "Back to mailbox"
+msgstr "メールボックスに戻る"
+
+msgid "Bcc recipients"
+msgstr "Bcc の宛先"
+
+msgid "Bold"
+msgstr "太字"
+
+msgid "Bulleted list"
+msgstr "箇条書き"
+
+msgid "Cache reload failed."
+msgstr "キャッシュの再読み込みに失敗しました。"
+
+msgid "Cache unavailable"
+msgstr "キャッシュを利用できません"
+
+msgid "Cancel"
+msgstr "キャンセル"
+
+msgid "Cc recipients"
+msgstr "Cc の宛先"
+
+msgid "Cc/Bcc"
+msgstr "Cc/Bcc"
+
+msgid "Cc: {recipients}"
+msgstr "Cc: {recipients}"
+
+msgid "Change not saved."
+msgstr "変更は保存されませんでした。"
+
+msgid "Changes not saved."
+msgstr "変更は保存されませんでした。"
+
+msgid "Close"
+msgstr "閉じる"
+
+msgid "Compose"
+msgstr "作成"
+
+msgid "Continue Editing"
+msgstr "編集を続ける"
+
+msgid "Convert"
+msgstr "変換"
+
+msgid "Copy"
+msgstr "コピー"
+
+msgid "Default"
+msgstr "デフォルト"
+
+msgid "Discard"
+msgstr "破棄"
+
+msgid "Draft loaded"
+msgstr "下書きを読み込みました"
+
+msgid "Draft not saved."
+msgstr "下書きは保存されませんでした。"
+
+msgid "Draft ready"
+msgstr "下書きの準備ができました"
+
+msgid "Draft saved"
+msgstr "下書きを保存しました"
+
+msgid "Drafts"
+msgstr "下書き"
+
+msgid "Edit"
+msgstr "編集"
+
+msgid "Edit Alias"
+msgstr "エイリアスを編集"
+
+msgid "Edit Draft"
+msgstr "下書きを編集"
+
+msgid "Folder is empty."
+msgstr "フォルダーは空です。"
+
+msgid "Folders"
+msgstr "フォルダー"
+
+msgid "Forward"
+msgstr "転送"
+
+msgid "From: {sender}    {date}"
+msgstr "差出人: {sender}    {date}"
+
+msgid "HTML"
+msgstr "HTML"
+
+msgid "Identity unavailable"
+msgstr "送信者情報を利用できません"
+
+msgid "In Trash"
+msgstr "ゴミ箱にあります"
+
+msgid "Inbox"
+msgstr "受信トレイ"
+
+msgid "Italic"
+msgstr "斜体"
+
+msgid "Link not opened."
+msgstr "リンクを開けませんでした。"
+
+msgid "Loading folders…"
+msgstr "フォルダーを読み込んでいます…"
+
+msgid "Loading mail"
+msgstr "メールを読み込んでいます"
+
+msgid "Loading mail…"
+msgstr "メールを読み込んでいます…"
+
+msgid "Loading message"
+msgstr "メッセージを読み込んでいます"
+
+msgid "Loading messages"
+msgstr "メッセージを読み込んでいます"
+
+msgid "Local cache has no matches."
+msgstr "ローカルキャッシュに一致する項目はありません。"
+
+msgid "Mail Settings"
+msgstr "メール設定"
+
+msgid "Mail link unavailable."
+msgstr "メールリンクを利用できません。"
+
+msgid "Mail unavailable"
+msgstr "メールを利用できません"
+
+msgid "Mailbox"
+msgstr "メールボックス"
+
+msgid "Mark Read"
+msgstr "既読にする"
+
+msgid "Mark Unread"
+msgstr "未読にする"
+
+msgid "Message"
+msgstr "本文"
+
+msgid "Message not converted"
+msgstr "本文を変換できませんでした"
+
+msgid "Message not sent."
+msgstr "メッセージは送信されませんでした。"
+
+msgid "Message unavailable"
+msgstr "メッセージを利用できません"
+
+msgid "Message unavailable."
+msgstr "メッセージを利用できません。"
+
+msgid "Messages"
+msgstr "メッセージ"
+
+msgid "Messages unavailable"
+msgstr "メッセージを利用できません"
+
+msgid "Messages unavailable."
+msgstr "メッセージを利用できません。"
+
+msgid "Modified"
+msgstr "変更あり"
+
+msgid "More headers"
+msgstr "その他のヘッダー"
+
+msgid "Move to Trash"
+msgstr "ゴミ箱へ移動"
+
+msgid "New Message"
+msgstr "新しいメッセージ"
+
+msgid "New mail"
+msgstr "新着メール"
+
+msgid "No attachments"
+msgstr "添付ファイルなし"
+
+msgid "No mail account"
+msgstr "メールアカウントがありません"
+
+msgid "No matches"
+msgstr "一致する項目はありません"
+
+msgid "No message selected"
+msgstr "メッセージが選択されていません"
+
+msgid "No messages"
+msgstr "メッセージはありません"
+
+msgid "Not saved"
+msgstr "未保存"
+
+msgid "Not sent"
+msgstr "未送信"
+
+msgid "Numbered list"
+msgstr "番号付きリスト"
+
+msgid "Offline"
+msgstr "オフライン"
+
+msgid "Open"
+msgstr "開く"
+
+msgid "Open Draft"
+msgstr "下書きを開く"
+
+msgid "Opening local cache…"
+msgstr "ローカルキャッシュを開いています…"
+
+msgid "Optional Reply-To"
+msgstr "任意の返信先"
+
+msgid "Outbox"
+msgstr "送信トレイ"
+
+msgid "Pigeon Mail contributors"
+msgstr "Pigeon Mail の貢献者"
+
+msgid "Queued"
+msgstr "送信待ち"
+
+msgid "Reading the local mail cache…"
+msgstr "ローカルメールキャッシュを読み込んでいます…"
+
+msgid "Recipients"
+msgstr "宛先"
+
+msgid "Refresh current account"
+msgstr "現在のアカウントを更新"
+
+msgid "Refresh unavailable"
+msgstr "更新を利用できません"
+
+msgid "Remove"
+msgstr "削除"
+
+msgid "Reply"
+msgstr "返信"
+
+msgid "Reply All"
+msgstr "全員に返信"
+
+msgid "Reply-To: {address}"
+msgstr "返信先: {address}"
+
+msgid "Save"
+msgstr "保存"
+
+msgid "Save As"
+msgstr "名前を付けて保存"
+
+msgid "Save Draft"
+msgstr "下書きを保存"
+
+msgid "Save attachment"
+msgstr "添付ファイルを保存"
+
+msgid "Saving…"
+msgstr "保存しています…"
+
+msgid "Search"
+msgstr "検索"
+
+msgid "Search current account"
+msgstr "現在のアカウントを検索"
+
+msgid "Search unavailable."
+msgstr "検索を利用できません。"
+
+msgid "Searching local cache…"
+msgstr "ローカルキャッシュを検索しています…"
+
+msgid "Searching mail"
+msgstr "メールを検索しています"
+
+msgid "Select All"
+msgstr "すべて選択"
+
+msgid "Select a message to read it."
+msgstr "読むメッセージを選択してください。"
+
+msgid "Send"
+msgstr "送信"
+
+msgid "Sending…"
+msgstr "送信しています…"
+
+msgid "Sent"
+msgstr "送信済み"
+
+msgid "Set Default"
+msgstr "デフォルトに設定"
+
+msgid "Signature"
+msgstr "署名"
+
+msgid "Signature not converted."
+msgstr "署名は変換されませんでした。"
+
+msgid "Star"
+msgstr "スターを付ける"
+
+msgid "Starred"
+msgstr "スター付き"
+
+msgid "Strikethrough"
+msgstr "取り消し線"
+
+msgid "Subject"
+msgstr "件名"
+
+msgid "Switching account…"
+msgstr "アカウントを切り替えています…"
+
+msgid "Tasks still pending"
+msgstr "保留中のタスクがあります"
+
+msgid "Text"
+msgstr "テキスト"
+
+msgid "The current message has unsaved changes."
+msgstr "現在のメッセージには未保存の変更があります。"
+
+msgid "Trash"
+msgstr "ゴミ箱"
+
+msgid "Underline"
+msgstr "下線"
+
+msgid "Unknown sender"
+msgstr "不明な差出人"
+
+msgid "Unsaved draft"
+msgstr "未保存の下書き"
+
+msgid "Unstar"
+msgstr "スターを外す"
+
+msgid "mail account"
+msgstr "メールアカウント"
+
+msgid "A GNOME mail client powered by Evolution Data Server."
+msgstr "Evolution Data Server を利用する GNOME メールクライアントです。"
+
+msgid "Email Client"
+msgstr "メールクライアント"
+
+msgid "Read and send email"
+msgstr "メールを読んだり送信したりします"
+
+msgid "Compose New Message"
+msgstr "新しいメッセージを作成"
+
+msgid "Read and send email on GNOME"
+msgstr "GNOME でメールを読んだり送信したりします"
+
+msgid "mail;email;inbox;message;"
+msgstr "mail;email;inbox;message;メール;受信トレイ;メッセージ;"
+
+msgid "(No subject)"
+msgstr "(件名なし)"
+
+msgid "(No subject) ({count})"
+msgstr "(件名なし) ({count})"
+
+msgid "Forward draft ready"
+msgstr "転送用の下書きができました"
+
+msgid "Forward draft saved"
+msgstr "転送用の下書きを保存しました"
+
+msgid "Not opened: {attachment}"
+msgstr "開けませんでした: {attachment}"
+
+msgid "Not saved: {attachment}"
+msgstr "保存できませんでした: {attachment}"
+
+msgid "Opening {attachment}"
+msgstr "{attachment} を開いています"
+
+msgid "Reply draft ready"
+msgstr "返信用の下書きができました"
+
+msgid "Reply draft saved"
+msgstr "返信用の下書きを保存しました"
+
+msgid "Reply-all draft ready"
+msgstr "全員に返信する下書きができました"
+
+msgid "Reply-all draft saved"
+msgstr "全員に返信する下書きを保存しました"
+
+msgid "Saved {attachment}"
+msgstr "{attachment} を保存しました"
+
+msgid "Search results for “{query}”"
+msgstr "「{query}」の検索結果"
+
+msgid "To: {recipients}"
+msgstr "宛先: {recipients}"
+
+msgid "{subject} ({count})"
+msgstr "{subject} ({count})"
+
+msgid "© 2026 Pigeon Mail contributors"
+msgstr "© 2026 Pigeon Mail の貢献者"
+
+msgid "_Address"
+msgstr "アドレス(_A)"
+
+msgid "_Bcc"
+msgstr "Bcc(_B)"
+
+msgid "_Cc"
+msgstr "Cc(_C)"
+
+msgid "_From"
+msgstr "差出人(_F)"
+
+msgid "_Name"
+msgstr "名前(_N)"
+
+msgid "_Reply-To"
+msgstr "返信先(_R)"
+
+msgid "_Subject"
+msgstr "件名(_S)"
+
+msgid "_To"
+msgstr "宛先(_T)"
+
+msgid "Pigeon Mail is a GNOME email client using GNOME Online Accounts and Evolution Data Server for accounts, offline mail storage, and delivery."
+msgstr "Pigeon Mail は、アカウント、オフラインメール保存、配送に GNOME オンラインアカウントと Evolution Data Server を使用する GNOME メールクライアントです。"
+
+msgid "It supports HTML mail, sending identities, attachments, drafts, search, and cache-first message actions."
+msgstr "HTML メール、送信者情報、添付ファイル、下書き、検索、キャッシュ優先のメッセージ操作に対応しています。"
+
+msgid "Closing now will discard {count} pending task."
+msgid_plural "Closing now will discard {count} pending tasks."
+msgstr[0] "今閉じると、保留中のタスク {count} 件が破棄されます。"
+
+msgid "{count} new conversation in {folder} — {account}"
+msgid_plural "{count} new conversations in {folder} — {account}"
+msgstr[0] "{folder} に {count} 件の新しいスレッド — {account}"
+
+msgid "{count} task pending"
+msgid_plural "{count} tasks pending"
+msgstr[0] "保留中のタスク {count} 件"
+
+msgid "No usable mail account is currently available."
+msgstr "現在利用できるメールアカウントはありません。"
+
+msgid "Account discovery or the mail service may be unavailable."
+msgstr "アカウントの検出またはメールサービスを利用できない可能性があります。"
+
+msgid "Mail account unavailable"
+msgstr "メールアカウントを利用できません"
+
+msgid "Explore the three-pane mailbox"
+msgstr "3 ペインのメールボックスを試す"
+
+msgid "Use the folder list, message list, and reading pane with the mouse or keyboard."
+msgstr "フォルダー一覧、メッセージ一覧、閲覧ペインはマウスまたはキーボードで操作できます。"
+
+msgid "Use Up and Down inside a list, and Left and Right to move between the folder list, message list, and reading pane. Activating a message opens it; focus and selection remain useful visual indicators."
+msgstr "一覧内では上矢印と下矢印を使い、左矢印と右矢印でフォルダー一覧、メッセージ一覧、閲覧ペインの間を移動します。メッセージを有効にすると開きます。フォーカスと選択は視覚的な目印としても役立ちます。"
+
+msgid "Add five translations, align attachment interfaces across reading and composition, and refine localized mail dates and close confirmations."
+msgstr "5 言語の翻訳を追加し、閲覧画面と作成画面の添付ファイル UI を統一して、ローカライズされたメールの日付表示と終了確認を改善しました。"
+
+msgid "Rework account identities around EDS, make local mailboxes the cache-first drafts and delivery boundary, and refine the adaptive mailbox, composer, and settings interfaces."
+msgstr "アカウントの送信者情報を EDS 中心に再構成し、ローカルメールボックスをキャッシュ優先の下書き・配送境界にして、メールボックス、作成画面、設定画面の適応型 UI を改善しました。"
+
+msgid "Keep cached message switching responsive during downloads and document the Microsoft 365 alias transport fix."
+msgstr "ダウンロード中もキャッシュ済みメッセージの切り替えを快適に保ち、Microsoft 365 のエイリアス配送修正を文書化しました。"
+
+msgid "Improve account refresh and recovery, composition state handling, and asynchronous attachment saving."
+msgstr "アカウントの更新と復旧、作成状態の処理、添付ファイルの非同期保存を改善しました。"
+
+msgid "Notify from every mail folder, open the real source folder, and improve cached mailbox consistency."
+msgstr "すべてのメールフォルダーから通知し、実際の移動元フォルダーを開き、キャッシュ済みメールボックスの整合性を改善しました。"
+
+msgid "Fix desktop Compose activation, mailto URI handling, and stub composition."
+msgstr "デスクトップからの作成起動、mailto URI の処理、スタブでの作成を修正しました。"
+
+msgid "Date"
+msgstr "日付"
+
+msgid "Unknown date"
+msgstr "日付不明"
+
+msgid "Forwarded message"
+msgstr "転送メッセージ"
+
+msgid "From"
+msgstr "差出人"
+
+msgid "On {date}, {sender} wrote:"
+msgstr "{date} に {sender} さんが書きました:"
+
+msgid "To"
+msgstr "宛先"

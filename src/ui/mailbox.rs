@@ -13,6 +13,7 @@ pub(crate) use state::MailboxViewModel;
 use preview::PreviewWidgets;
 
 use crate::core::coordinator::MailCoordinator;
+use crate::i18n::{gettext, gettext_f, ngettext_f};
 use crate::model::account::MailAccount;
 use crate::model::event::MailEvent;
 use crate::model::mail::{AttachmentOperation, FolderId, MailtoRequest};
@@ -76,9 +77,14 @@ impl MailboxNavigation {
         thread_panel: &ThreadPanelWidgets,
         preview_panel: &gtk::ScrolledWindow,
     ) -> Self {
-        let folder_page = adw::NavigationPage::with_tag(&sidebar.container, "Folders", "folders");
+        let folder_page =
+            adw::NavigationPage::with_tag(&sidebar.container, &gettext("Folders"), "folders");
         let thread_page =
-            adw::NavigationPage::with_tag(&thread_panel.container, "Messages", "messages");
+            adw::NavigationPage::with_tag(
+                &thread_panel.container,
+                &gettext("Messages"),
+                "messages",
+            );
         let folder_split = adw::NavigationSplitView::builder()
             .sidebar(&folder_page)
             .content(&thread_page)
@@ -89,19 +95,27 @@ impl MailboxNavigation {
             .build();
 
         let list_page =
-            adw::NavigationPage::with_tag(&folder_split, "Mailbox", "mailbox-lists");
+            adw::NavigationPage::with_tag(
+                &folder_split,
+                &gettext("Mailbox"),
+                "mailbox-lists",
+            );
         let preview_page =
-            adw::NavigationPage::with_tag(preview_panel, "Message", "message-preview");
+            adw::NavigationPage::with_tag(
+                preview_panel,
+                &gettext("Message"),
+                "message-preview",
+            );
         let reader_split = adw::NavigationSplitView::builder()
             .sidebar(&list_page)
             .content(&preview_page)
             .min_sidebar_width(480.0)
-            .max_sidebar_width(640.0)
-            .sidebar_width_fraction(0.45)
+            .max_sidebar_width(600.0)
+            .sidebar_width_fraction(0.43)
             .build();
         let back_button = gtk::Button::builder()
             .icon_name("go-previous-symbolic")
-            .tooltip_text("Back")
+            .tooltip_text(gettext("Back"))
             .build();
 
         Self {
@@ -161,27 +175,27 @@ impl MainWindow {
             .build();
 
         let compose_button = gtk::Button::builder()
-            .label("Compose")
+            .label(gettext("Compose"))
             .action_name("win.compose")
             .css_classes(["suggested-action"])
             .build();
         let about_button = gtk::Button::builder()
             .icon_name("help-about-symbolic")
-            .tooltip_text("About")
+            .tooltip_text(gettext("About"))
             .action_name("win.about")
             .build();
         header.pack_end(&about_button);
 
         let preferences_button = gtk::Button::builder()
             .icon_name("emblem-system-symbolic")
-            .tooltip_text("Mail Settings")
+            .tooltip_text(gettext("Mail Settings"))
             .action_name("win.preferences")
             .build();
         header.pack_end(&preferences_button);
 
         let refresh_button = gtk::Button::builder()
             .icon_name("view-refresh-symbolic")
-            .tooltip_text("Refresh current account")
+            .tooltip_text(gettext("Refresh current account"))
             .build();
         header.pack_end(&refresh_button);
 
@@ -221,7 +235,7 @@ impl MainWindow {
         header.set_title_widget(Some(&title_stack));
 
         let search_entry = gtk::SearchEntry::builder()
-            .placeholder_text("Search current account")
+            .placeholder_text(gettext("Search current account"))
             .halign(gtk::Align::Center)
             .width_chars(30)
             .max_width_chars(40)
@@ -231,7 +245,7 @@ impl MainWindow {
         search_bar.connect_entry(&search_entry);
         let search_button = gtk::Button::builder()
             .icon_name("system-search-symbolic")
-            .tooltip_text("Search current account")
+            .tooltip_text(gettext("Search current account"))
             .action_name("win.search")
             .build();
 
@@ -332,7 +346,7 @@ impl MainWindow {
         account_dropdown.set_sensitive(account_ready);
         let compact_compose_button = gtk::Button::builder()
             .icon_name("mail-message-new-symbolic")
-            .tooltip_text("Compose")
+            .tooltip_text(gettext("Compose"))
             .action_name("win.compose")
             .visible(false)
             .build();
@@ -375,35 +389,7 @@ impl MainWindow {
             });
         });
 
-        let close_confirmed = Rc::new(Cell::new(false));
-        let confirmed_for_close = Rc::clone(&close_confirmed);
-        let coordinator_for_close = coordinator.clone();
-        let compose_for_close = compose_page.clone();
-        let parent_for_close = inner.clone();
-        inner.connect_close_request(move |_| {
-            let work_count = coordinator_for_close.pending_work_count()
-                + usize::from(compose_for_close.has_unaccepted_write());
-            if confirmed_for_close.get() || work_count == 0 {
-                return glib::Propagation::Proceed;
-            }
-            let dialog = adw::AlertDialog::builder()
-                .heading("Tasks still pending")
-                .body(format!("Closing now will discard {work_count} pending task(s)."))
-                .build();
-            dialog.add_responses(&[("cancel", "Cancel"), ("close", "Close")]);
-            dialog.set_response_appearance("close", adw::ResponseAppearance::Destructive);
-            dialog.set_default_response(Some("cancel"));
-            dialog.set_close_response("cancel");
-            let confirmed = Rc::clone(&confirmed_for_close);
-            let parent = parent_for_close.clone();
-            dialog.choose(Some(&parent_for_close), None::<&gio::Cancellable>, move |response| {
-                if response == "close" {
-                    confirmed.set(true);
-                    parent.close();
-                }
-            });
-            glib::Propagation::Stop
-        });
+        install_close_guard(&inner, &coordinator, &compose_page);
 
         let compose_page_for_back = compose_page.clone();
         let page_stack_for_back = page_stack.clone();
@@ -564,7 +550,7 @@ impl MainWindow {
                             account_dropdown_for_events.set_sensitive(account_ready);
                             mailbox_controls_for_events.update(account_ready);
                             compose_page_for_events.mailbox_changed();
-                            title_for_events.set_subtitle(status_summary);
+                            title_for_events.set_subtitle(&status_summary);
                             rebuild_sidebar(&state_for_refresh_events, &sidebar_for_refresh_events);
                             rebuild_thread_panel(
                                 &state_for_refresh_events,
@@ -599,7 +585,7 @@ impl MainWindow {
                         {
                             let status_summary =
                                 state_for_refresh_events.borrow().status_summary();
-                            title_for_events.set_subtitle(status_summary);
+                            title_for_events.set_subtitle(&status_summary);
                         }
                         if let Some(reload) = reload {
                             request_view_reload(&coordinator_for_events, reload);
@@ -653,9 +639,9 @@ impl MainWindow {
                         let account_name = state_for_refresh_events
                             .borrow()
                             .account_display_name(&account_id)
-                            .unwrap_or("mail account")
-                            .to_string();
-                        let notification = gio::Notification::new("New mail");
+                            .map(str::to_owned)
+                            .unwrap_or_else(|| gettext("mail account"));
+                        let notification = gio::Notification::new(&gettext("New mail"));
                         notification.set_body(Some(&new_mail_notification_body(
                             count,
                             &folder_name,
@@ -796,10 +782,10 @@ impl MainWindow {
                                 toast.dismiss();
                             }
                         } else if let Some(toast) = current_toast {
-                            toast.set_title(&format!("{count} tasks pending"));
+                            toast.set_title(&pending_tasks_label(count));
                         } else {
                             let toast = adw::Toast::builder()
-                                .title(format!("{count} tasks pending"))
+                                .title(pending_tasks_label(count))
                                 .build();
                             let pending = Rc::downgrade(&pending_work_for_events);
                             toast.connect_dismissed(move |dismissed| {
@@ -899,7 +885,7 @@ impl MainWindow {
                 state.account_ready(),
             )
         };
-        self.title.set_subtitle(status_summary);
+        self.title.set_subtitle(&status_summary);
         refresh_account_dropdown_from_accounts(
             &self.account_dropdown,
             &accounts,
@@ -1003,6 +989,88 @@ impl MainWindow {
             &self.toast_overlay,
         );
     }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CloseState {
+    Idle,
+    AwaitingPendingDecision,
+    PendingWarningAccepted,
+    AwaitingComposeDecision,
+    Allowed,
+}
+
+fn install_close_guard(
+    window: &adw::ApplicationWindow,
+    coordinator: &MailCoordinator,
+    compose_page: &ComposePage,
+) {
+    let close_state = Rc::new(Cell::new(CloseState::Idle));
+    let state_for_close = Rc::clone(&close_state);
+    let coordinator = coordinator.clone();
+    let compose_page = compose_page.clone();
+    let parent_window = window.clone();
+    window.connect_close_request(move |_| {
+        let state = state_for_close.get();
+        if state == CloseState::Allowed {
+            return glib::Propagation::Proceed;
+        }
+        if matches!(
+            state,
+            CloseState::AwaitingPendingDecision | CloseState::AwaitingComposeDecision
+        ) {
+            return glib::Propagation::Stop;
+        }
+
+        let work_count = coordinator.pending_work_count()
+            + usize::from(compose_page.has_unaccepted_write());
+        if work_count > 0 && state != CloseState::PendingWarningAccepted {
+            state_for_close.set(CloseState::AwaitingPendingDecision);
+            let dialog = adw::AlertDialog::builder()
+                .heading(gettext("Tasks still pending"))
+                .body(
+                    ngettext_f(
+                        "Closing now will discard {count} pending task.",
+                        "Closing now will discard {count} pending tasks.",
+                        work_count as u32,
+                        &[("count", &work_count.to_string())],
+                    )
+                )
+                .build();
+            dialog.add_response("cancel", &gettext("Cancel"));
+            dialog.add_response("close", &gettext("Close"));
+            dialog.set_response_appearance("close", adw::ResponseAppearance::Destructive);
+            dialog.set_default_response(Some("cancel"));
+            dialog.set_close_response("cancel");
+            let close_state = Rc::clone(&state_for_close);
+            let parent = parent_window.clone();
+            dialog.choose(
+                Some(&parent_window),
+                None::<&gio::Cancellable>,
+                move |response| {
+                    if response == "close" {
+                        close_state.set(CloseState::PendingWarningAccepted);
+                        parent.close();
+                    } else {
+                        close_state.set(CloseState::Idle);
+                    }
+                },
+            );
+            return glib::Propagation::Stop;
+        }
+        state_for_close.set(CloseState::AwaitingComposeDecision);
+        let state_after_discard = Rc::clone(&state_for_close);
+        let parent = parent_window.clone();
+        let state_after_cancel = Rc::clone(&state_for_close);
+        compose_page.request_close(
+            move || {
+                state_after_discard.set(CloseState::Allowed);
+                glib::idle_add_local_once(move || parent.close());
+            },
+            move || state_after_cancel.set(CloseState::Idle),
+        );
+        glib::Propagation::Stop
+    });
 }
 
 fn install_adaptive_mailbox_layout(
@@ -1146,7 +1214,7 @@ fn present_mailto_request(
         ComposeViewModel::for_mailto(&mailbox, &request)
     };
     let Some(model) = model else {
-        toast_overlay.add_toast(adw::Toast::new("Mail link unavailable."));
+        toast_overlay.add_toast(adw::Toast::new(&gettext("Mail link unavailable.")));
         tracing::warn!("mailto request could not be opened without a sending identity");
         return;
     };
@@ -1161,12 +1229,24 @@ fn notification_belongs_to_current_account(
 }
 
 fn new_mail_notification_body(count: usize, folder_name: &str, account_name: &str) -> String {
-    format!(
-        "{} new conversation{} in {} — {}",
-        count,
-        if count == 1 { "" } else { "s" },
-        folder_name,
-        account_name,
+    ngettext_f(
+        "{count} new conversation in {folder} — {account}",
+        "{count} new conversations in {folder} — {account}",
+        count as u32,
+        &[
+            ("count", &count.to_string()),
+            ("folder", folder_name),
+            ("account", account_name),
+        ],
+    )
+}
+
+fn pending_tasks_label(count: usize) -> String {
+    ngettext_f(
+        "{count} task pending",
+        "{count} tasks pending",
+        count as u32,
+        &[("count", &count.to_string())],
     )
 }
 
@@ -1244,7 +1324,7 @@ fn build_account_dropdown(
         controls.search_entry.set_text("");
         navigation.show_folders();
         let status_summary = state_for_change.borrow().status_summary();
-        title.set_subtitle(status_summary);
+        title.set_subtitle(&status_summary);
         rebuild_sidebar(&state_for_change, &sidebar);
         rebuild_thread_panel(&state_for_change, &thread_panel);
         coordinator.request_account_activation(
@@ -1350,7 +1430,7 @@ fn build_sidebar(
     let loading_label = gtk::Label::builder()
         .xalign(0.0)
         .css_classes(["dim-label"])
-        .label("Loading folders…")
+        .label(gettext("Loading folders…"))
         .build();
     let loading_page = gtk::Box::builder()
         .spacing(10)
@@ -1450,11 +1530,11 @@ fn build_thread_panel(
     let loading_spinner = gtk::Spinner::new();
     loading_spinner.add_css_class("mailbox-loading-spinner");
     let loading_title = gtk::Label::builder()
-        .label("Loading messages")
+        .label(gettext("Loading messages"))
         .css_classes(["title-3"])
         .build();
     let loading_description = gtk::Label::builder()
-        .label("Reading the local mail cache…")
+        .label(gettext("Reading the local mail cache…"))
         .wrap(true)
         .max_width_chars(28)
         .justify(gtk::Justification::Center)
@@ -1473,13 +1553,13 @@ fn build_thread_panel(
     loading_page.append(&loading_description);
     let empty_page = adw::StatusPage::builder()
         .icon_name("mail-unread-symbolic")
-        .title("No messages")
-        .description("Folder is empty.")
+        .title(gettext("No messages"))
+        .description(gettext("Folder is empty."))
         .css_classes(["compact"])
         .build();
     let error_page = adw::StatusPage::builder()
         .icon_name("dialog-error-symbolic")
-        .title("Messages unavailable")
+        .title(gettext("Messages unavailable"))
         .css_classes(["compact"])
         .build();
     let content_stack = gtk::Stack::builder()
@@ -1556,7 +1636,7 @@ fn build_thread_panel(
 
 fn rebuild_sidebar(state: &Rc<RefCell<MailboxViewModel>>, widgets: &SidebarWidgets) {
     let content = state.borrow().sidebar_content();
-    widgets.account_title.set_label("Folders");
+    widgets.account_title.set_label(&gettext("Folders"));
 
     match content {
         state::SidebarContent::Loading => {
@@ -1612,20 +1692,29 @@ fn rebuild_thread_panel(state: &Rc<RefCell<MailboxViewModel>>, widgets: &ThreadP
     widgets.heading.set_label(&view.heading);
     match &view.content {
         state::ThreadListContent::LoadingMailbox => {
-            widgets.show_loading("Loading mail", "Opening local cache…")
+            widgets.show_loading(&gettext("Loading mail"), &gettext("Opening local cache…"))
         }
         state::ThreadListContent::LoadingMessages => {
-            widgets.show_loading("Loading messages", "Opening local cache…")
+            widgets.show_loading(
+                &gettext("Loading messages"),
+                &gettext("Opening local cache…"),
+            )
         }
         state::ThreadListContent::Searching => {
-            widgets.show_loading("Searching mail", "Searching local cache…")
+            widgets.show_loading(
+                &gettext("Searching mail"),
+                &gettext("Searching local cache…"),
+            )
         }
         state::ThreadListContent::SearchFailed(error) => widgets.show_error(error),
         state::ThreadListContent::EmptyFolder => {
-            widgets.show_empty("No messages", "Folder is empty.")
+            widgets.show_empty(&gettext("No messages"), &gettext("Folder is empty."))
         }
         state::ThreadListContent::EmptySearch => {
-            widgets.show_empty("No matches", "Local cache has no matches.")
+            widgets.show_empty(
+                &gettext("No matches"),
+                &gettext("Local cache has no matches."),
+            )
         }
         state::ThreadListContent::Messages { threads, selected } => {
             widgets.show_messages();
@@ -1685,7 +1774,7 @@ fn append_thread_row(thread_list: &gtk::ListBox, thread: &crate::model::mail::Co
         .lines(1)
         .css_classes(["heading"])
         .label(if thread.participants.is_empty() {
-            "Unknown sender".into()
+            gettext("Unknown sender")
         } else {
             thread.participants.join(", ")
         })
@@ -1696,13 +1785,13 @@ fn append_thread_row(thread_list: &gtk::ListBox, thread: &crate::model::mail::Co
     sender_line.append(&participants);
     if thread.attachment_count > 0 {
         let attachment = gtk::Image::from_icon_name("mail-attachment-symbolic");
-        attachment.set_tooltip_text(Some("Attachments"));
+        attachment.set_tooltip_text(Some(&gettext("Attachments")));
         attachment.add_css_class("dim-label");
         sender_line.append(&attachment);
     }
     if thread.starred {
         let star = gtk::Image::from_icon_name("starred-symbolic");
-        star.set_tooltip_text(Some("Starred"));
+        star.set_tooltip_text(Some(&gettext("Starred")));
         star.add_css_class("accent");
         sender_line.append(&star);
     }
@@ -1750,12 +1839,25 @@ fn folder_icon_name(kind: crate::model::mail::FolderKind) -> &'static str {
 
 fn thread_subject_label(thread: &crate::model::mail::ConversationSummary) -> String {
     let subject = if thread.subject.trim().is_empty() {
-        "(No subject)"
+        return if thread.message_count > 1 {
+            gettext_f(
+                "(No subject) ({count})",
+                &[("count", &thread.message_count.to_string())],
+            )
+        } else {
+            gettext("(No subject)")
+        };
     } else {
         thread.subject.trim()
     };
     if thread.message_count > 1 {
-        format!("{subject}  ({})", thread.message_count)
+        gettext_f(
+            "{subject} ({count})",
+            &[
+                ("subject", subject),
+                ("count", &thread.message_count.to_string()),
+            ],
+        )
     } else {
         subject.into()
     }
@@ -1935,10 +2037,16 @@ fn handle_prepared_attachment(
             let toast_overlay = toast_overlay.clone();
             launcher.launch(Some(parent), None::<&gio::Cancellable>, move |result| {
                 let message = match result {
-                    Ok(_) => format!("Opening {attachment_name}"),
+                    Ok(_) => gettext_f(
+                        "Opening {attachment}",
+                        &[("attachment", &attachment_name)],
+                    ),
                     Err(error) => {
                         crate::logging::report_failure("attachment-open", &error.into());
-                        format!("Not opened: {attachment_name}")
+                        gettext_f(
+                            "Not opened: {attachment}",
+                            &[("attachment", &attachment_name)],
+                        )
                     }
                 };
                 toast_overlay.add_toast(adw::Toast::new(&message));
@@ -1946,8 +2054,8 @@ fn handle_prepared_attachment(
         }
         AttachmentOperation::SaveAs => {
             let dialog = gtk::FileDialog::builder()
-                .title("Save attachment")
-                .accept_label("Save")
+                .title(gettext("Save attachment"))
+                .accept_label(gettext("Save"))
                 .initial_name(&attachment_name)
                 .build();
             let parent = parent.clone();
@@ -1965,10 +2073,16 @@ fn handle_prepared_attachment(
                     None,
                     move |result| {
                         let message = match result {
-                            Ok(_) => format!("Saved {attachment_name}"),
+                            Ok(_) => gettext_f(
+                                "Saved {attachment}",
+                                &[("attachment", &attachment_name)],
+                            ),
                             Err(error) => {
                                 crate::logging::report_failure("attachment-save", &error.into());
-                                format!("Not saved: {attachment_name}")
+                                gettext_f(
+                                    "Not saved: {attachment}",
+                                    &[("attachment", &attachment_name)],
+                                )
                             }
                         };
                         toast_overlay.add_toast(adw::Toast::new(&message));

@@ -732,7 +732,7 @@ fn remove_source(source: *mut ESource) {
         if e_source_remove_sync(source, ptr::null_mut(), &mut error) == 0
             && let Some(error) = take_gerror(error)
         {
-            tracing::warn!(error = %error, "could not remove unused EDS signature source");
+            crate::logging::report_failure("eds-signature-cleanup", &error);
         }
     }
 }
@@ -1163,26 +1163,26 @@ unsafe fn source_identity_extension(
         tracing::warn!("EDS identity extension contains an incomplete metadata record");
         return IdentityExtensionState::Invalid;
     }
-    let mut native_addresses = HashSet::new();
+    let mut standard_addresses = HashSet::new();
     if let Some(address) = unsafe { source_mail_identity_address(source) } {
-        native_addresses.insert(crate::model::address::normalized_mailbox_address(&address));
+        standard_addresses.insert(crate::model::address::normalized_mailbox_address(&address));
     }
     if let Some(aliases) = unsafe { source_mail_identity_aliases(source) } {
-        native_addresses.extend(
+        standard_addresses.extend(
             super::camel::decode_addresses(&aliases)
                 .expect("an EDS C string cannot contain an interior NUL")
                 .into_iter()
                 .map(|(address, _)| crate::model::address::normalized_mailbox_address(&address)),
         );
     }
-    native_addresses.remove("");
+    standard_addresses.remove("");
     let mut represented = HashSet::new();
     let stored_count = identity_records.len() / 4;
     let Some(identities) = identity_records
         .chunks_exact(4)
         .filter(|fields| {
             let address = crate::model::address::normalized_mailbox_address(&fields[0]);
-            native_addresses.contains(&address) && represented.insert(address)
+            standard_addresses.contains(&address) && represented.insert(address)
         })
         .map(|fields| {
             Some(IdentityMetadata {
@@ -1249,7 +1249,7 @@ unsafe fn load_signature_source(
     let contents = unsafe { OwnedGlibString::from_ptr(contents) };
     if success == 0 {
         if let Some(error) = take_gerror(error) {
-            tracing::warn!(error = %error, "could not load EDS signature source");
+            crate::logging::report_failure("eds-signature-load", &error);
         }
         return None;
     }

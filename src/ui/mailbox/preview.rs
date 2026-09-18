@@ -4,8 +4,10 @@ use std::rc::Rc;
 use adw::prelude::*;
 use gtk::{gio, glib, pango};
 
+use crate::i18n::{format_datetime, gettext, gettext_f};
 use crate::integration::webkit::{configure_mail_view, load_html_document, stop_html_loading};
 use crate::model::mail::AttachmentOperation;
+use crate::ui::attachment;
 
 use super::state;
 
@@ -19,7 +21,6 @@ pub(super) struct PreviewWidgets {
     cc_recipients: gtk::Label,
     reply_to_value: gtk::Label,
     additional_headers_toggle: gtk::ToggleButton,
-    attachments_label: gtk::Label,
     attachments_list: gtk::ListBox,
     loading_spinner: gtk::Spinner,
     error_page: adw::StatusPage,
@@ -90,7 +91,7 @@ impl PreviewWidgets {
             .build();
         let additional_headers_toggle = gtk::ToggleButton::builder()
             .icon_name("view-more-symbolic")
-            .tooltip_text("More headers")
+            .tooltip_text(gettext("More headers"))
             .valign(gtk::Align::Center)
             .css_classes(["flat"])
             .build();
@@ -101,14 +102,15 @@ impl PreviewWidgets {
         let recipients_line = gtk::Box::builder().spacing(4).build();
         recipients_line.append(&recipients);
         recipients_line.append(&additional_headers_toggle);
-        let attachments_label = gtk::Label::builder()
-            .xalign(0.0)
-            .css_classes(["heading"])
-            .label("Attachments")
-            .build();
         let attachments_list = gtk::ListBox::builder()
             .selection_mode(gtk::SelectionMode::None)
-            .css_classes(["boxed-list"])
+            .show_separators(true)
+            .build();
+        let attachment_viewport = attachment::viewport(&attachments_list);
+        let attachment_frame = gtk::Frame::builder()
+            .label(gettext("Attachments"))
+            .css_classes(["compact-list-frame"])
+            .child(&attachment_viewport)
             .build();
         let loading_spinner = gtk::Spinner::new();
         loading_spinner.set_halign(gtk::Align::Center);
@@ -116,11 +118,11 @@ impl PreviewWidgets {
         loading_spinner.start();
         let loading_title = gtk::Label::builder()
             .css_classes(["title-3"])
-            .label("Loading message")
+            .label(gettext("Loading message"))
             .build();
         let loading_description = gtk::Label::builder()
             .css_classes(["dim-label"])
-            .label("Opening local cache…")
+            .label(gettext("Opening local cache…"))
             .build();
         let loading_box = gtk::Box::builder()
             .orientation(gtk::Orientation::Vertical)
@@ -134,14 +136,14 @@ impl PreviewWidgets {
         loading_box.append(&loading_description);
         let error_page = adw::StatusPage::builder()
             .icon_name("dialog-error-symbolic")
-            .title("Message unavailable")
+            .title(gettext("Message unavailable"))
             .vexpand(true)
             .css_classes(["compact", "mailbox-empty-state"])
             .build();
         let empty_page = adw::StatusPage::builder()
             .icon_name("mail-read-symbolic")
-            .title("No message selected")
-            .description("Select a message to read it.")
+            .title(gettext("No message selected"))
+            .description(gettext("Select a message to read it."))
             .vexpand(true)
             .css_classes(["compact", "mailbox-empty-state"])
             .build();
@@ -155,8 +157,6 @@ impl PreviewWidgets {
         content.append(&meta);
         content.append(&recipients_line);
         content.append(&additional_headers_revealer);
-        content.append(&attachments_label);
-        content.append(&attachments_list);
         let state_stack = gtk::Stack::builder()
             .transition_type(gtk::StackTransitionType::Crossfade)
             .hhomogeneous(false)
@@ -168,31 +168,31 @@ impl PreviewWidgets {
         state_stack.add_named(&error_page, Some("error"));
         state_stack.add_named(&empty_page, Some("empty"));
         let reply_button = gtk::Button::builder()
-            .label("Reply")
+            .label(gettext("Reply"))
             .can_shrink(true)
             .build();
         let reply_all_button = gtk::Button::builder()
-            .label("Reply All")
+            .label(gettext("Reply All"))
             .can_shrink(true)
             .build();
         let forward_button = gtk::Button::builder()
-            .label("Forward")
+            .label(gettext("Forward"))
             .can_shrink(true)
             .build();
         let star_button = gtk::Button::builder()
-            .label("Star")
+            .label(gettext("Star"))
             .can_shrink(true)
             .build();
         let read_button = gtk::Button::builder()
-            .label("Mark Read")
+            .label(gettext("Mark Read"))
             .can_shrink(true)
             .build();
         let archive_button = gtk::Button::builder()
-            .label("Archive")
+            .label(gettext("Archive"))
             .can_shrink(true)
             .build();
         let trash_button = gtk::Button::builder()
-            .label("Move to Trash")
+            .label(gettext("Move to Trash"))
             .can_shrink(true)
             .build();
         let html_view = webkit::WebView::new();
@@ -207,7 +207,7 @@ impl PreviewWidgets {
                 move |result| {
                     if let Err(error) = result {
                         crate::logging::report_failure("message-link-open", &error.into());
-                        toast.add_toast(adw::Toast::new("Link not opened."));
+                        toast.add_toast(adw::Toast::new(&gettext("Link not opened.")));
                     }
                 },
             );
@@ -238,8 +238,8 @@ impl PreviewWidgets {
             .hexpand(true)
             .vexpand(true)
             .build();
-        mode_stack.add_titled(&html_view, Some("html"), "HTML");
-        mode_stack.add_titled(&text_scroller, Some("text"), "Text");
+        mode_stack.add_titled(&html_view, Some("html"), &gettext("HTML"));
+        mode_stack.add_titled(&text_scroller, Some("text"), &gettext("Text"));
         mode_stack.set_visible_child_name("html");
         let mode_switcher = adw::InlineViewSwitcher::builder()
             .stack(&mode_stack)
@@ -264,7 +264,7 @@ impl PreviewWidgets {
             .child(&action_buttons)
             .build();
         let actions = gtk::ToggleButton::builder()
-            .label("Actions")
+            .label(gettext("Actions"))
             .can_shrink(true)
             .build();
         let action_revealer_for_toggle = action_revealer.clone();
@@ -274,13 +274,25 @@ impl PreviewWidgets {
         let preview_controls = gtk::Box::builder()
             .spacing(6)
             .halign(gtk::Align::Start)
-            .margin_top(8)
             .build();
         preview_controls.append(&mode_switcher);
         preview_controls.append(&actions);
-        content.append(&preview_controls);
-        content.append(&action_revealer);
-        content.append(&mode_stack);
+        let body_frame = gtk::Frame::builder()
+            .label(gettext("Message"))
+            .child(&mode_stack)
+            .css_classes(["compact-list-frame"])
+            .vexpand(true)
+            .build();
+        let body_section = gtk::Box::builder()
+            .orientation(gtk::Orientation::Vertical)
+            .spacing(6)
+            .vexpand(true)
+            .build();
+        body_section.append(&preview_controls);
+        body_section.append(&action_revealer);
+        body_section.append(&body_frame);
+        content.append(&body_section);
+        content.append(&attachment_frame);
         let panel_content = gtk::Box::builder()
             .orientation(gtk::Orientation::Vertical)
             .spacing(8)
@@ -309,7 +321,6 @@ impl PreviewWidgets {
             cc_recipients,
             reply_to_value,
             additional_headers_toggle,
-            attachments_label,
             attachments_list,
             loading_spinner,
             error_page,
@@ -357,20 +368,31 @@ impl PreviewWidgets {
             self.additional_headers_toggle.set_active(false);
         }
         if let Some(detail) = detail {
-            self.star_button
-                .set_label(if detail.starred { "Unstar" } else { "Star" });
-            self.read_button.set_label(if detail.unread {
-                "Mark Read"
+            self.star_button.set_label(&if detail.starred {
+                gettext("Unstar")
             } else {
-                "Mark Unread"
+                gettext("Star")
+            });
+            self.read_button.set_label(&if detail.unread {
+                gettext("Mark Read")
+            } else {
+                gettext("Mark Unread")
             });
         } else {
-            self.star_button.set_label("Star");
-            self.read_button.set_label("Mark Read");
+            self.star_button.set_label(&gettext("Star"));
+            self.read_button.set_label(&gettext("Mark Read"));
         }
         if let Some(detail) = detail {
-            self.meta
-                .set_label(&format!("From: {}    {}", detail.from, detail.date_label));
+            let date = format_datetime(detail.date_unix_secs);
+            let sender = if detail.from.trim().is_empty() {
+                gettext("Unknown sender")
+            } else {
+                detail.from.clone()
+            };
+            self.meta.set_label(&gettext_f(
+                "From: {sender}    {date}",
+                &[("sender", &sender), ("date", &date)],
+            ));
         }
         self.render_current(content);
     }
@@ -387,9 +409,9 @@ impl PreviewWidgets {
             self.star_button.set_sensitive(false);
             self.read_button.set_sensitive(false);
             self.archive_button.set_sensitive(false);
-            self.archive_button.set_label("Archive");
+            self.archive_button.set_label(&gettext("Archive"));
             self.trash_button.set_sensitive(false);
-            self.trash_button.set_label("Move to Trash");
+            self.trash_button.set_label(&gettext("Move to Trash"));
             self.actions.set_active(false);
             return;
         };
@@ -404,21 +426,27 @@ impl PreviewWidgets {
         self.star_button.set_sensitive(action_ready);
         self.archive_button
             .set_sensitive(action_ready && *has_archive && !is_archive && !is_trash);
-        self.archive_button
-            .set_label(if is_archive { "Archived" } else { "Archive" });
+        self.archive_button.set_label(&if is_archive {
+            gettext("Archived")
+        } else {
+            gettext("Archive")
+        });
         self.trash_button
             .set_sensitive(action_ready && *has_trash && !is_trash);
-        self.trash_button.set_label(if is_trash {
-            "In Trash"
+        self.trash_button.set_label(&if is_trash {
+            gettext("In Trash")
         } else {
-            "Move to Trash"
+            gettext("Move to Trash")
         });
     }
 
     fn set_compose_actions(&self, enabled: bool, opens_draft: bool) {
         self.reply_button.set_sensitive(enabled);
-        self.reply_button
-            .set_label(if opens_draft { "Open Draft" } else { "Reply" });
+        self.reply_button.set_label(&if opens_draft {
+            gettext("Open Draft")
+        } else {
+            gettext("Reply")
+        });
         self.reply_all_button
             .set_sensitive(enabled && !opens_draft);
         self.forward_button.set_sensitive(enabled);
@@ -429,17 +457,31 @@ impl PreviewWidgets {
             self.subject.set_visible(true);
             self.meta.set_visible(true);
             self.recipients.set_visible(true);
-            self.subject.set_label(&detail.subject);
-            self.recipients
-                .set_label(&format!("To: {}", detail.to.join(", ")));
-            self.cc_recipients
-                .set_label(&format!("Cc: {}", detail.cc.join(", ")));
+            let subject = if detail.subject.trim().is_empty() {
+                gettext("(No subject)")
+            } else {
+                detail.subject.clone()
+            };
+            self.subject.set_label(&subject);
+            self.recipients.set_label(
+                &gettext_f(
+                    "To: {recipients}",
+                    &[("recipients", &detail.to.join(", "))],
+                ),
+            );
+            self.cc_recipients.set_label(
+                &gettext_f(
+                    "Cc: {recipients}",
+                    &[("recipients", &detail.cc.join(", "))],
+                ),
+            );
             let has_cc = !detail.cc.is_empty();
             self.cc_recipients.set_visible(has_cc);
             let has_reply_to = detail.reply_to.is_some();
             if let Some(reply_to) = detail.reply_to.as_deref() {
-                self.reply_to_value
-                    .set_label(&format!("Reply-To: {reply_to}"));
+                self.reply_to_value.set_label(
+                    &gettext_f("Reply-To: {address}", &[("address", reply_to)]),
+                );
                 self.reply_to_value.set_visible(true);
             } else {
                 self.reply_to_value.set_visible(false);
@@ -452,12 +494,6 @@ impl PreviewWidgets {
                 &detail.attachments,
                 attachment_dispatch,
             );
-            self.attachments_label
-                .set_label(&format!("Attachments ({})", detail.attachments.len()));
-            self.attachments_label
-                .set_visible(!detail.attachments.is_empty());
-            self.attachments_list
-                .set_visible(!detail.attachments.is_empty());
             self.mode_switcher.set_visible(true);
             self.mode_stack.set_visible(true);
             let html_body = detail.body.presentation_html();
@@ -498,8 +534,6 @@ impl PreviewWidgets {
             self.reply_to_value.set_visible(false);
             self.additional_headers_toggle.set_active(false);
             self.additional_headers_toggle.set_visible(false);
-            self.attachments_label.set_visible(false);
-            self.attachments_list.set_visible(false);
             rebuild_preview_attachment_list(&self.attachments_list, &[], None);
             self.mode_switcher.set_visible(false);
             self.mode_stack.set_visible(false);
@@ -633,9 +667,12 @@ fn popup_text_menu(
     let buffer = text_view.buffer();
     menu.remove_all();
     if buffer.selection_bounds().is_some() {
-        menu.append(Some("Copy"), Some("reader-text.copy"));
+        menu.append(Some(&gettext("Copy")), Some("reader-text.copy"));
     }
-    menu.append(Some("Select All"), Some("reader-text.select-all"));
+    menu.append(
+        Some(&gettext("Select All")),
+        Some("reader-text.select-all"),
+    );
     let pointing_to = gtk::gdk::Rectangle::new(x.round() as i32, y.round() as i32, 1, 1);
     popover.set_pointing_to(Some(&pointing_to));
     popover.popup();
@@ -656,60 +693,32 @@ fn rebuild_preview_attachment_list(
 ) {
     list.remove_all();
 
-    for attachment in attachments {
-        let row = gtk::ListBoxRow::new();
-        let box_row = gtk::Box::builder()
-            .spacing(12)
-            .margin_top(8)
-            .margin_bottom(8)
-            .margin_start(12)
-            .margin_end(12)
-            .build();
-        let text_box = gtk::Box::builder()
-            .orientation(gtk::Orientation::Vertical)
-            .spacing(4)
-            .hexpand(true)
-            .build();
-        let title_label = gtk::Label::builder()
-            .xalign(0.0)
-            .hexpand(true)
-            .ellipsize(pango::EllipsizeMode::End)
-            .lines(1)
-            .label(&attachment.display_name)
-            .build();
-        let title = gtk::Button::builder()
-            .hexpand(true)
-            .can_shrink(true)
-            .css_classes(["flat"])
-            .child(&title_label)
-            .build();
-        let subtitle_text = attachment.location.external_uri().unwrap_or("");
-        let subtitle = gtk::Label::builder()
-            .xalign(0.0)
-            .css_classes(["dim-label"])
-            .label(subtitle_text)
-            .build();
-        subtitle.set_ellipsize(pango::EllipsizeMode::Middle);
-        subtitle.set_single_line_mode(true);
-        subtitle.set_visible(!subtitle_text.is_empty());
-        text_box.append(&title);
-        text_box.append(&subtitle);
-        box_row.append(&text_box);
+    if attachments.is_empty() {
+        let (row, open) = attachment::row(
+            "mail-attachment-symbolic",
+            &gettext("No attachments"),
+            None,
+        );
+        open.set_sensitive(false);
+        list.append(&row);
+        return;
+    }
 
-        let actions = gtk::Box::builder()
-            .spacing(6)
-            .halign(gtk::Align::End)
-            .build();
+    for attachment in attachments {
         let save_button = gtk::Button::builder()
-            .label("Save As")
+            .label(gettext("Save As"))
             .can_shrink(true)
+            .valign(gtk::Align::Center)
             .build();
-        actions.append(&save_button);
-        box_row.append(&actions);
+        let (row, open) = attachment::row(
+            "mail-attachment-symbolic",
+            &attachment.display_name,
+            Some(save_button.upcast_ref()),
+        );
 
         if let Some(dispatch) = dispatch.clone() {
             let attachment = attachment.clone();
-            title.connect_clicked(move |_| {
+            open.connect_clicked(move |_| {
                 dispatch(AttachmentOperation::Open, attachment.clone());
             });
         }
@@ -719,8 +728,6 @@ fn rebuild_preview_attachment_list(
                 dispatch(AttachmentOperation::SaveAs, attachment.clone());
             });
         }
-        row.set_child(Some(&box_row));
-        row.set_activatable(false);
         list.append(&row);
     }
 }

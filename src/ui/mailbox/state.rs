@@ -1,3 +1,4 @@
+use crate::i18n::{gettext, gettext_f};
 use crate::model::account::{MailAccount, MailAccountId};
 use crate::model::event::{
     AccountMailboxLoad, MailboxContentSnapshot, RefreshFailureKind, RequestId,
@@ -295,26 +296,26 @@ impl MailboxViewModel {
         )
     }
 
-    pub fn status_summary(&self) -> &'static str {
+    pub fn status_summary(&self) -> String {
         if self.is_loading() {
-            return "Loading mail…";
+            return gettext("Loading mail…");
         }
         if let Some(failure) = self
             .current_account_id()
             .and_then(|account_id| self.refresh_failures.get(&account_id).copied())
         {
             return match failure {
-                RefreshFailureKind::Connectivity => "Offline",
-                RefreshFailureKind::Authentication => "Authentication failed",
-                RefreshFailureKind::Storage => "Cache unavailable",
-                RefreshFailureKind::Backend => "Refresh unavailable",
+                RefreshFailureKind::Connectivity => gettext("Offline"),
+                RefreshFailureKind::Authentication => gettext("Authentication failed"),
+                RefreshFailureKind::Storage => gettext("Cache unavailable"),
+                RefreshFailureKind::Backend => gettext("Refresh unavailable"),
             };
         }
         match self.mailbox_mode {
-            MailboxMode::Loading => "Loading mail…",
-            MailboxMode::NoAccount => "No mail account",
-            MailboxMode::Unavailable => "Mail unavailable",
-            MailboxMode::Live => "",
+            MailboxMode::Loading => gettext("Loading mail…"),
+            MailboxMode::NoAccount => gettext("No mail account"),
+            MailboxMode::Unavailable => gettext("Mail unavailable"),
+            MailboxMode::Live => String::new(),
         }
     }
 
@@ -453,12 +454,12 @@ impl MailboxViewModel {
     pub(super) fn thread_list_view(&self) -> ThreadListView {
         let query = self.search_query();
         let (heading, content) = if self.is_loading() {
-            ("Mailbox".into(), ThreadListContent::LoadingMailbox)
+            (gettext("Mailbox"), ThreadListContent::LoadingMailbox)
         } else if query.is_empty() {
             let heading = self
                 .current_folder()
                 .map(|folder| folder.name.clone())
-                .unwrap_or_else(|| "Mailbox".into());
+                .unwrap_or_else(|| gettext("Mailbox"));
             let content = if self.initial_threads_loading() {
                 ThreadListContent::LoadingMessages
             } else if self.threads.is_empty() {
@@ -468,10 +469,10 @@ impl MailboxViewModel {
             };
             (heading, content)
         } else if self.search_loading() {
-            ("Search".into(), ThreadListContent::Searching)
+            (gettext("Search"), ThreadListContent::Searching)
         } else if let Some(error) = self.search_error() {
             (
-                "Search".into(),
+                gettext("Search"),
                 ThreadListContent::SearchFailed(error.to_owned()),
             )
         } else {
@@ -480,7 +481,10 @@ impl MailboxViewModel {
             } else {
                 self.thread_list_content()
             };
-            (format!("Search results for \"{query}\""), content)
+            (
+                gettext_f("Search results for “{query}”", &[("query", query)]),
+                content,
+            )
         };
         ThreadListView {
             heading,
@@ -1163,7 +1167,7 @@ impl MailboxViewModel {
             Ok(Some(detail)) if detail.conversation_id == conversation_id => {
                 MessageDetailState::Loaded(detail)
             }
-            Ok(Some(_)) | Ok(None) => MessageDetailState::Failed("Message unavailable.".into()),
+            Ok(Some(_)) | Ok(None) => MessageDetailState::Failed(gettext("Message unavailable.")),
             Err(error) => MessageDetailState::Failed(error),
         };
         true
@@ -1296,7 +1300,7 @@ mod tests {
             cc: Vec::new(),
             bcc: Vec::new(),
             reply_to: None,
-            date_label: String::new(),
+            date_unix_secs: 0,
             starred: false,
             unread: false,
             attachments: Vec::new(),
