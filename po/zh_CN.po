@@ -547,24 +547,6 @@ msgstr "使用鼠标或键盘操作文件夹列表、邮件列表和阅读窗格
 msgid "Use Up and Down inside a list, and Left and Right to move between the folder list, message list, and reading pane. Activating a message opens it; focus and selection remain useful visual indicators."
 msgstr "在列表中使用上、下方向键，并使用左、右方向键在文件夹列表、邮件列表和阅读窗格之间移动。激活邮件即可打开；焦点和选中状态仍可作为有效的视觉提示。"
 
-msgid "Add five translations, align attachment interfaces across reading and composition, and refine localized mail dates and close confirmations."
-msgstr "新增五种语言翻译，统一阅读与写作界面的附件设计，并改进本地化邮件日期和关闭确认。"
-
-msgid "Rework account identities around EDS, make local mailboxes the cache-first drafts and delivery boundary, and refine the adaptive mailbox, composer, and settings interfaces."
-msgstr "围绕 EDS 重构账户身份，将本地邮箱作为缓存优先的草稿与投递边界，并改进邮箱、写信和设置的自适应界面。"
-
-msgid "Keep cached message switching responsive during downloads and document the Microsoft 365 alias transport fix."
-msgstr "保持下载期间切换缓存邮件的响应速度，并记录 Microsoft 365 别名传输修复。"
-
-msgid "Improve account refresh and recovery, composition state handling, and asynchronous attachment saving."
-msgstr "改进账户刷新与恢复、写信状态处理和附件异步保存。"
-
-msgid "Notify from every mail folder, open the real source folder, and improve cached mailbox consistency."
-msgstr "从所有邮件文件夹发送通知、打开真实来源文件夹，并改进缓存邮箱的一致性。"
-
-msgid "Fix desktop Compose activation, mailto URI handling, and stub composition."
-msgstr "修复桌面写信激活、mailto URI 处理和占位账户写信。"
-
 msgid "Date"
 msgstr "日期"
 

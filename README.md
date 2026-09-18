@@ -9,34 +9,17 @@ Server and Camel, so reading and common message actions remain cache-first.
 - Per-account three-pane mailbox with folders, conversations, search, and
   on-demand pagination
 - Cached message reading with HTML and plain-text views
-- Read, unread, starred, archive, trash, draft, and sent-mail workflows
-- Text, HTML, and multipart composition with explicit conversion between text
-  and HTML
+- Read, starred, archive, trash, draft, outbox, and sent-mail workflows
+- Text, HTML, and multipart composition
 - Reply, reply-all, forward, aliases, Reply-To addresses, and signatures
 - Attachment opening, asynchronous saving, and sending
-- Manual draft saving and a durable local outbox for deferred delivery
-- Desktop notifications for new unread mail in every folder of the current account
-- `mailto:` integration and a reusable full-window composer
-- A non-persistent stub mailbox when no eligible account is available
+- Desktop notifications and `mailto:` integration
 
 ## Accounts and synchronization
 
-Pigeon Mail does not maintain a separate account database or provide an account
-setup wizard. Add an account in GNOME Settings under **Online Accounts** and
-enable its mail service. Pigeon Mail lists accounts for which Evolution Data
-Server exposes a complete GOA-linked mail account, identity, and transport.
-
-Only the selected account receives automatic foreground work. If it is changed
-while a write is still running, the previous account drains that write's complete
-synchronization chain, including required replay and confirmation, and then
-retains its materialized backend and local cache while quiescent.
-Unmaterialized accounts are not synchronized speculatively. Message bodies
-and attachments are fetched when opened.
-
-Local actions are committed to the EDS/Camel cache first. Network-dependent work
-is then synchronized in the background. Unresolved operation intents are kept
-for the current run and their count is shown in the window; closing with pending
-work warns that those tasks will be lost.
+Add accounts in GNOME Settings under **Online Accounts** and enable mail.
+Pigeon Mail uses EDS/Camel as its account and mail authority: local actions are
+cache-first and network synchronization continues in the background.
 
 ## Requirements
 
@@ -57,15 +40,9 @@ requirements.
 
 ### Microsoft 365 alias sending
 
-The Microsoft 365 transport in evolution-ews can replace an Outlook.com alias
-with the account's primary address when it submits raw MIME. A provider-side
-patch keeps primary-address delivery on the MIME path and uses the structured
-Microsoft 365 submission path for alternate sending identities.
-
-Fedora users can find `SOURCES/evolution-ews-send-from-alias.patch` in the
+Microsoft 365 alias sending currently requires
+`SOURCES/evolution-ews-send-from-alias.patch` from the
 [`fedora-rpm-rebuild` repository](https://github.com/fxzxmicah/fedora-rpm-rebuild).
-Apply it when rebuilding evolution-ews; Pigeon Mail itself continues to use
-EDS/Camel exclusively and does not connect to provider APIs directly.
 
 ## Build from source
 
@@ -97,13 +74,9 @@ data at normal release log levels.
 
 ## Current scope
 
-Pigeon Mail is designed for a modern GNOME desktop and the provider support
-available through GOA and EDS. It has no unified inbox, account-creation UI, or
-automatic draft saving. Provider-specific behavior and uncommon MIME structures
-remain ongoing interoperability work.
-
-Mail cache ownership remains with EDS/Camel. Lightweight preferences use
-GSettings, identity extensions and signatures remain on their EDS sources.
+Pigeon Mail currently has no unified inbox, account-creation UI, or automatic
+draft saving. Provider-specific behavior and uncommon MIME structures remain
+ongoing interoperability work.
 
 ## Contributing
 

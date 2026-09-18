@@ -14,7 +14,21 @@ fn main() {
         std::env::var_os("OUT_DIR").expect("Cargo must provide an OUT_DIR to the build script"),
     );
     compile_development_schemas(&output_directory);
-    compile_message_catalogs(&output_directory);
+    let runtime_prefix = match std::env::var_os("PREFIX") {
+        Some(prefix) => {
+            let prefix = PathBuf::from(prefix);
+            assert!(
+                prefix.is_absolute(),
+                "PREFIX must be an absolute installation prefix"
+            );
+            prefix
+        }
+        None => {
+            compile_message_catalogs(&output_directory);
+            output_directory.clone()
+        }
+    };
+    println!("cargo:rustc-env=PREFIX={}", runtime_prefix.display());
 
     let camel = pkg_config::Config::new()
         .cargo_metadata(false)
@@ -88,9 +102,4 @@ fn compile_message_catalogs(output_directory: &Path) {
         assert!(status.success(), "failed to compile {source}");
         println!("cargo:rerun-if-changed={source}");
     }
-
-    let runtime_prefix = std::env::var_os("PREFIX")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| output_directory.to_path_buf());
-    println!("cargo:rustc-env=PREFIX={}", runtime_prefix.display());
 }

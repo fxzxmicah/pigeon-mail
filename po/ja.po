@@ -546,24 +546,6 @@ msgstr "フォルダー一覧、メッセージ一覧、閲覧ペインはマウ
 msgid "Use Up and Down inside a list, and Left and Right to move between the folder list, message list, and reading pane. Activating a message opens it; focus and selection remain useful visual indicators."
 msgstr "一覧内では上矢印と下矢印を使い、左矢印と右矢印でフォルダー一覧、メッセージ一覧、閲覧ペインの間を移動します。メッセージを有効にすると開きます。フォーカスと選択は視覚的な目印としても役立ちます。"
 
-msgid "Add five translations, align attachment interfaces across reading and composition, and refine localized mail dates and close confirmations."
-msgstr "5 言語の翻訳を追加し、閲覧画面と作成画面の添付ファイル UI を統一して、ローカライズされたメールの日付表示と終了確認を改善しました。"
-
-msgid "Rework account identities around EDS, make local mailboxes the cache-first drafts and delivery boundary, and refine the adaptive mailbox, composer, and settings interfaces."
-msgstr "アカウントの送信者情報を EDS 中心に再構成し、ローカルメールボックスをキャッシュ優先の下書き・配送境界にして、メールボックス、作成画面、設定画面の適応型 UI を改善しました。"
-
-msgid "Keep cached message switching responsive during downloads and document the Microsoft 365 alias transport fix."
-msgstr "ダウンロード中もキャッシュ済みメッセージの切り替えを快適に保ち、Microsoft 365 のエイリアス配送修正を文書化しました。"
-
-msgid "Improve account refresh and recovery, composition state handling, and asynchronous attachment saving."
-msgstr "アカウントの更新と復旧、作成状態の処理、添付ファイルの非同期保存を改善しました。"
-
-msgid "Notify from every mail folder, open the real source folder, and improve cached mailbox consistency."
-msgstr "すべてのメールフォルダーから通知し、実際の移動元フォルダーを開き、キャッシュ済みメールボックスの整合性を改善しました。"
-
-msgid "Fix desktop Compose activation, mailto URI handling, and stub composition."
-msgstr "デスクトップからの作成起動、mailto URI の処理、スタブでの作成を修正しました。"
-
 msgid "Date"
 msgstr "日付"
 

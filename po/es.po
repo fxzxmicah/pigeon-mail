@@ -549,24 +549,6 @@ msgstr "Use la lista de carpetas, la lista de mensajes y el panel de lectura con
 msgid "Use Up and Down inside a list, and Left and Right to move between the folder list, message list, and reading pane. Activating a message opens it; focus and selection remain useful visual indicators."
 msgstr "Use Arriba y Abajo dentro de una lista, e Izquierda y Derecha para moverse entre la lista de carpetas, la lista de mensajes y el panel de lectura. Al activar un mensaje se abre; el foco y la selección siguen siendo indicadores visuales útiles."
 
-msgid "Add five translations, align attachment interfaces across reading and composition, and refine localized mail dates and close confirmations."
-msgstr "Añade cinco traducciones, unifica las interfaces de adjuntos durante la lectura y la redacción, y mejora las fechas de correo localizadas y las confirmaciones de cierre."
-
-msgid "Rework account identities around EDS, make local mailboxes the cache-first drafts and delivery boundary, and refine the adaptive mailbox, composer, and settings interfaces."
-msgstr "Se han reorganizado las identidades de cuenta en torno a EDS, se han convertido los buzones locales en el límite de borradores y entrega con prioridad para la caché y se han mejorado las interfaces adaptables del buzón, el editor y la configuración."
-
-msgid "Keep cached message switching responsive during downloads and document the Microsoft 365 alias transport fix."
-msgstr "Se mantiene ágil el cambio entre mensajes almacenados en caché durante las descargas y se documenta la corrección del transporte de alias de Microsoft 365."
-
-msgid "Improve account refresh and recovery, composition state handling, and asynchronous attachment saving."
-msgstr "Se mejoran la actualización y recuperación de cuentas, la gestión del estado de redacción y el guardado asíncrono de adjuntos."
-
-msgid "Notify from every mail folder, open the real source folder, and improve cached mailbox consistency."
-msgstr "Se notifica desde todas las carpetas de correo, se abre la carpeta de origen real y se mejora la coherencia del buzón almacenado en caché."
-
-msgid "Fix desktop Compose activation, mailto URI handling, and stub composition."
-msgstr "Se corrigen la activación de redacción desde el escritorio, la gestión de URI mailto y la redacción con la cuenta de prueba."
-
 msgid "Date"
 msgstr "Fecha"
 

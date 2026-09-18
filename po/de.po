@@ -549,24 +549,6 @@ msgstr "Ordnerliste, Nachrichtenliste und Lesebereich können mit Maus oder Tast
 msgid "Use Up and Down inside a list, and Left and Right to move between the folder list, message list, and reading pane. Activating a message opens it; focus and selection remain useful visual indicators."
 msgstr "Verwenden Sie in einer Liste die Pfeiltasten nach oben und unten und wechseln Sie mit links und rechts zwischen Ordnerliste, Nachrichtenliste und Lesebereich. Beim Aktivieren wird eine Nachricht geöffnet; Fokus und Auswahl bleiben hilfreiche visuelle Hinweise."
 
-msgid "Add five translations, align attachment interfaces across reading and composition, and refine localized mail dates and close confirmations."
-msgstr "Fünf Übersetzungen hinzugefügt, die Anhangsansichten beim Lesen und Verfassen vereinheitlicht sowie lokalisierte E-Mail-Datumsangaben und Schließbestätigungen verbessert."
-
-msgid "Rework account identities around EDS, make local mailboxes the cache-first drafts and delivery boundary, and refine the adaptive mailbox, composer, and settings interfaces."
-msgstr "Kontenidentitäten auf EDS umgestellt, lokale Postfächer als Cache-zentrierte Entwurfs- und Zustellgrenze eingerichtet und die adaptiven Oberflächen für Postfach, Verfassen und Einstellungen verfeinert."
-
-msgid "Keep cached message switching responsive during downloads and document the Microsoft 365 alias transport fix."
-msgstr "Wechsel zwischen zwischengespeicherten Nachrichten während Downloads reaktionsfähig gehalten und die Microsoft-365-Korrektur für Alias-Transporte dokumentiert."
-
-msgid "Improve account refresh and recovery, composition state handling, and asynchronous attachment saving."
-msgstr "Kontoaktualisierung und -wiederherstellung, Verfassungsstatus und asynchrones Speichern von Anhängen verbessert."
-
-msgid "Notify from every mail folder, open the real source folder, and improve cached mailbox consistency."
-msgstr "Benachrichtigungen aus allen E-Mail-Ordnern, Öffnen des tatsächlichen Quellordners und verbesserte Konsistenz zwischengespeicherter Postfächer."
-
-msgid "Fix desktop Compose activation, mailto URI handling, and stub composition."
-msgstr "Aktivierung des Verfassens über den Desktop, Verarbeitung von mailto-URIs und Verfassen im Platzhalter korrigiert."
-
 msgid "Date"
 msgstr "Datum"
 

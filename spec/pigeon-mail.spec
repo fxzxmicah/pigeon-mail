@@ -1,5 +1,5 @@
 Name:           pigeon-mail
-Version:        0.2.1
+Version:        0.2.2
 Release:        1%{?dist}
 Summary:        GNOME email client using Evolution Data Server
 URL:            https://github.com/fxzxmicah/pigeon-mail
@@ -33,8 +33,9 @@ HTML mail, attachments, drafts, search, and cache-first message actions.
 %cargo_prep
 
 %build
+export PREFIX=%{_prefix}
 %cargo_license_summary
-PREFIX=%{_prefix} %cargo_build
+%cargo_build
 
 %install
 install -Dpm0755 target/rpm/pigeon %{buildroot}%{_bindir}/pigeon
@@ -75,6 +76,7 @@ sed 's#@bindir@#%{_bindir}#g' \
 %find_lang pigeon
 
 %check
+export PREFIX=%{_prefix}
 %cargo_test
 desktop-file-validate %{buildroot}%{_datadir}/applications/org.gnome.pigeon.desktop
 appstreamcli validate --no-net --pedantic %{buildroot}%{_metainfodir}/org.gnome.pigeon.metainfo.xml
@@ -90,6 +92,9 @@ glib-compile-schemas --strict --dry-run %{buildroot}%{_datadir}/glib-2.0/schemas
 %{_datadir}/icons/hicolor/scalable/apps/org.gnome.pigeon.svg
 
 %changelog
+* Fri Sep 18 2026 Fxzx micah <48860358+fxzxmicah@users.noreply.github.com> - 0.2.2-1
+- Restore translations in packaged installations
+
 * Fri Sep 18 2026 Fxzx micah <48860358+fxzxmicah@users.noreply.github.com> - 0.2.1-1
 - Add German, Spanish, French, Japanese, and Simplified Chinese localization
 - Align attachment presentation across reading and composition

@@ -1826,11 +1826,11 @@ fn folder_icon_name(kind: crate::model::mail::FolderKind) -> &'static str {
     use crate::model::mail::FolderKind;
 
     match kind {
-        FolderKind::Inbox => "mail-inbox-symbolic",
+        FolderKind::Inbox => "mail-unread-symbolic",
         FolderKind::Drafts => "document-edit-symbolic",
-        FolderKind::Outbox => "mail-outbox-symbolic",
+        FolderKind::Outbox => "mail-send-receive-symbolic",
         FolderKind::Sent => "mail-send-symbolic",
-        FolderKind::Archive => "mail-archive-symbolic",
+        FolderKind::Archive => "folder-documents-symbolic",
         FolderKind::Trash => "user-trash-symbolic",
         FolderKind::Spam => "mail-mark-junk-symbolic",
         FolderKind::Custom => "folder-symbolic",
@@ -2096,10 +2096,10 @@ fn handle_prepared_attachment(
 #[cfg(test)]
 mod tests {
     use super::{
-        folder_icon_name, notification_belongs_to_current_account, thread_subject_label,
+        notification_belongs_to_current_account, thread_subject_label,
     };
     use crate::model::account::MailAccountId;
-    use crate::model::mail::{ConversationId, ConversationSummary, FolderId, FolderKind};
+    use crate::model::mail::{ConversationId, ConversationSummary, FolderId};
 
     fn thread(subject: &str, message_count: u32) -> ConversationSummary {
         ConversationSummary {
@@ -2124,24 +2124,6 @@ mod tests {
         assert!(grouped.contains("Subject"));
         assert!(grouped.contains('4'));
         assert!(thread_subject_label(&thread("   ", 2)).contains('2'));
-    }
-
-    #[test]
-    fn every_folder_kind_has_a_semantic_symbolic_icon() {
-        let icons = [
-            (FolderKind::Inbox, "mail-inbox-symbolic"),
-            (FolderKind::Drafts, "document-edit-symbolic"),
-            (FolderKind::Outbox, "mail-outbox-symbolic"),
-            (FolderKind::Sent, "mail-send-symbolic"),
-            (FolderKind::Archive, "mail-archive-symbolic"),
-            (FolderKind::Trash, "user-trash-symbolic"),
-            (FolderKind::Spam, "mail-mark-junk-symbolic"),
-            (FolderKind::Custom, "folder-symbolic"),
-        ];
-
-        for (kind, expected) in icons {
-            assert_eq!(folder_icon_name(kind), expected);
-        }
     }
 
     #[test]

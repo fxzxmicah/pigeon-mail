@@ -1,6 +1,6 @@
 [package]
 name = "pigeon-mail"
-version = "0.2.1"
+version = "0.2.2"
 edition = "2024"
 license = "MIT"
 description = "A GNOME-native email client built on GNOME Online Accounts and Evolution Data Server."

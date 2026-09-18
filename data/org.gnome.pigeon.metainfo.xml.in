@@ -1,6 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<!-- Translations are merged from po/ when the application is installed. -->
-<component type="desktop-application">
+<!-- Product metadata is translated; historical release notes remain English. -->
+<component type="desktop-application"
+           xmlns:its="http://www.w3.org/2005/11/its">
   <id>org.gnome.pigeon</id>
   <name>Pigeon Mail</name>
   <summary>Read and send email on GNOME</summary>
@@ -31,7 +32,12 @@
     <category>Email</category>
   </categories>
   <content_rating type="oars-1.1"/>
-  <releases>
+  <releases its:translate="no">
+    <release version="0.2.2" date="2026-09-18">
+      <description>
+        <p>Restore translations in packaged installations.</p>
+      </description>
+    </release>
     <release version="0.2.1" date="2026-09-18">
       <description>
         <p>Add five translations, align attachment interfaces across reading and composition, and refine localized mail dates and close confirmations.</p>

@@ -36,7 +36,7 @@ pub(crate) fn format_datetime(timestamp_secs: i64) -> String {
 
     glib::DateTime::from_unix_local(timestamp_secs)
         .ok()
-        .and_then(|datetime| datetime.format("%c").ok())
+        .and_then(|datetime| datetime.format("%x %H:%M").ok())
         .map(|value| value.to_string())
         .unwrap_or_else(|| gettext("Unknown date"))
 }

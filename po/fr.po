@@ -549,24 +549,6 @@ msgstr "Utilisez la liste des dossiers, la liste des messages et le volet de lec
 msgid "Use Up and Down inside a list, and Left and Right to move between the folder list, message list, and reading pane. Activating a message opens it; focus and selection remain useful visual indicators."
 msgstr "Utilisez Haut et Bas dans une liste, puis Gauche et Droite pour passer de la liste des dossiers à la liste des messages et au volet de lecture. L’activation ouvre un message ; le focus et la sélection restent des repères visuels utiles."
 
-msgid "Add five translations, align attachment interfaces across reading and composition, and refine localized mail dates and close confirmations."
-msgstr "Ajoute cinq traductions, harmonise les interfaces de pièces jointes entre la lecture et la rédaction, et affine les dates localisées et les confirmations de fermeture."
-
-msgid "Rework account identities around EDS, make local mailboxes the cache-first drafts and delivery boundary, and refine the adaptive mailbox, composer, and settings interfaces."
-msgstr "Recentrage des identités de compte sur EDS, utilisation des boîtes locales comme frontière privilégiant le cache pour les brouillons et la distribution, et amélioration des interfaces adaptatives de la boîte, de l’éditeur et des paramètres."
-
-msgid "Keep cached message switching responsive during downloads and document the Microsoft 365 alias transport fix."
-msgstr "Maintien de la réactivité lors du passage entre les messages en cache pendant les téléchargements et documentation du correctif de transport des alias Microsoft 365."
-
-msgid "Improve account refresh and recovery, composition state handling, and asynchronous attachment saving."
-msgstr "Amélioration de l’actualisation et de la récupération des comptes, de la gestion de l’état de rédaction et de l’enregistrement asynchrone des pièces jointes."
-
-msgid "Notify from every mail folder, open the real source folder, and improve cached mailbox consistency."
-msgstr "Notifications depuis chaque dossier, ouverture du véritable dossier source et amélioration de la cohérence de la boîte en cache."
-
-msgid "Fix desktop Compose activation, mailto URI handling, and stub composition."
-msgstr "Correction de l’activation de la rédaction depuis le bureau, de la gestion des URI mailto et de la rédaction avec le compte de démonstration."
-
 msgid "Date"
 msgstr "Date"
 

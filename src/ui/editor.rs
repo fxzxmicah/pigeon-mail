@@ -102,12 +102,12 @@ fn rich_text_formatting_bar(composer: &Rc<WebKitComposer>) -> gtk::Box {
             "Strikethrough",
         ),
         (
-            "format-list-unordered-symbolic",
+            "view-list-bullet-symbolic",
             gettext("Bulleted list"),
             "InsertUnorderedList",
         ),
         (
-            "format-list-ordered-symbolic",
+            "view-list-ordered-symbolic",
             gettext("Numbered list"),
             "InsertOrderedList",
         ),
