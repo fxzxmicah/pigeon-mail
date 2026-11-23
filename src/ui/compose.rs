@@ -45,22 +45,34 @@ enum ComposeActivity {
 impl ComposeOperation {
     fn progress_status(self) -> String {
         match self {
-            Self::SaveDraft => gettext("Saving…"),
-            Self::Send => gettext("Sending…"),
+            Self::SaveDraft => {
+                gettext("Saving…")
+            }
+            Self::Send => {
+                gettext("Sending…")
+            }
         }
     }
 
     fn failure_status(self) -> String {
         match self {
-            Self::SaveDraft => gettext("Not saved"),
-            Self::Send => gettext("Not sent"),
+            Self::SaveDraft => {
+                gettext("Not saved")
+            }
+            Self::Send => {
+                gettext("Not sent")
+            }
         }
     }
 
     fn capture_failure(self) -> String {
         match self {
-            Self::SaveDraft => gettext("Draft not saved."),
-            Self::Send => gettext("Message not sent."),
+            Self::SaveDraft => {
+                gettext("Draft not saved.")
+            }
+            Self::Send => {
+                gettext("Message not sent.")
+            }
         }
     }
 }
@@ -85,28 +97,26 @@ impl ComposeViewModel {
             account.default_identity()
         };
         let draft = match kind {
-            ComposeKind::New => draft::create_draft(account.id.clone(), identity),
-            ComposeKind::EditDraft => draft::create_edit_draft(
-                account.id.clone(),
-                identity,
-                message?,
-            ),
-            ComposeKind::Reply => draft::create_reply_draft(
-                account.id.clone(),
-                identity,
-                message?,
-            ),
-            ComposeKind::ReplyAll => draft::create_reply_all_draft(
-                account.id.clone(),
-                identity,
-                account.aliases(),
-                message?,
-            ),
-            ComposeKind::Forward => draft::create_forward_draft(
-                account.id.clone(),
-                identity,
-                message?,
-            ),
+            ComposeKind::New => {
+                draft::create_draft(account.id.clone(), identity)
+            }
+            ComposeKind::EditDraft => {
+                draft::create_edit_draft(account.id.clone(), identity, message?)
+            }
+            ComposeKind::Reply => {
+                draft::create_reply_draft(account.id.clone(), identity, message?)
+            }
+            ComposeKind::ReplyAll => {
+                draft::create_reply_all_draft(
+                    account.id.clone(),
+                    identity,
+                    account.aliases(),
+                    message?,
+                )
+            }
+            ComposeKind::Forward => {
+                draft::create_forward_draft(account.id.clone(), identity, message?)
+            }
         };
 
         Some(Self {
@@ -148,30 +158,58 @@ impl ComposeViewModel {
 
     pub fn title(&self) -> String {
         match self.kind {
-            ComposeKind::New => gettext("New Message"),
-            ComposeKind::EditDraft => gettext("Edit Draft"),
-            ComposeKind::Reply => gettext("Reply"),
-            ComposeKind::ReplyAll => gettext("Reply All"),
-            ComposeKind::Forward => gettext("Forward"),
+            ComposeKind::New => {
+                gettext("New Message")
+            }
+            ComposeKind::EditDraft => {
+                gettext("Edit Draft")
+            }
+            ComposeKind::Reply => {
+                gettext("Reply")
+            }
+            ComposeKind::ReplyAll => {
+                gettext("Reply All")
+            }
+            ComposeKind::Forward => {
+                gettext("Forward")
+            }
         }
     }
 
     pub fn initial_status(&self) -> String {
         match self.kind {
-            ComposeKind::New => gettext("Draft ready"),
-            ComposeKind::EditDraft => gettext("Draft loaded"),
-            ComposeKind::Reply => gettext("Reply draft ready"),
-            ComposeKind::ReplyAll => gettext("Reply-all draft ready"),
-            ComposeKind::Forward => gettext("Forward draft ready"),
+            ComposeKind::New => {
+                gettext("Draft ready")
+            }
+            ComposeKind::EditDraft => {
+                gettext("Draft loaded")
+            }
+            ComposeKind::Reply => {
+                gettext("Reply draft ready")
+            }
+            ComposeKind::ReplyAll => {
+                gettext("Reply-all draft ready")
+            }
+            ComposeKind::Forward => {
+                gettext("Forward draft ready")
+            }
         }
     }
 
     pub fn saved_status(&self) -> String {
         match self.kind {
-            ComposeKind::New | ComposeKind::EditDraft => gettext("Draft saved"),
-            ComposeKind::Reply => gettext("Reply draft saved"),
-            ComposeKind::ReplyAll => gettext("Reply-all draft saved"),
-            ComposeKind::Forward => gettext("Forward draft saved"),
+            ComposeKind::New | ComposeKind::EditDraft => {
+                gettext("Draft saved")
+            }
+            ComposeKind::Reply => {
+                gettext("Reply draft saved")
+            }
+            ComposeKind::ReplyAll => {
+                gettext("Reply-all draft saved")
+            }
+            ComposeKind::Forward => {
+                gettext("Forward draft saved")
+            }
         }
     }
 }
@@ -553,8 +591,12 @@ impl ComposePage {
             move |response| {
                 page.inner.navigation_dialog_open.set(false);
                 match response.as_str() {
-                    "discard" => page.perform_navigation(navigation),
-                    _ => page.cancel_navigation(navigation),
+                    "discard" => {
+                        page.perform_navigation(navigation);
+                    }
+                    _ => {
+                        page.cancel_navigation(navigation);
+                    }
                 }
             },
         );
@@ -588,7 +630,9 @@ impl ComposePage {
                     completed();
                 }
             }
-            NavigationRequest::Compose(model) => self.show_model(model),
+            NavigationRequest::Compose(model) => {
+                self.show_model(model);
+            }
             NavigationRequest::Close { proceed, .. } => {
                 proceed();
                 return;
@@ -877,7 +921,10 @@ impl ComposePage {
         )
     }
 
-    fn text_with_preserved_signature(&self, content: &ComposerContent) -> (String, Option<TextRange>) {
+    fn text_with_preserved_signature(
+        &self,
+        content: &ComposerContent,
+    ) -> (String, Option<TextRange>) {
         text_from_html_preserving_signature(
             content,
             &self.text_body(),
@@ -978,10 +1025,12 @@ impl ComposePage {
                 Ok(snapshot) => {
                     page.dispatch_operation(operation, snapshot.html, text, signature_range)
                 }
-                Err(()) => page.finish_operation_failure(
-                    operation.failure_status(),
-                    operation.capture_failure(),
-                ),
+                Err(()) => {
+                    page.finish_operation_failure(
+                        operation.failure_status(),
+                        operation.capture_failure(),
+                    );
+                }
             });
     }
 
@@ -1010,8 +1059,12 @@ impl ComposePage {
             .replace(html_body, text_body, signature_text_range);
         self.inner.activity.set(ComposeActivity::Writing(operation));
         match operation {
-            ComposeOperation::SaveDraft => self.inner.coordinator.request_save_draft(draft),
-            ComposeOperation::Send => self.inner.coordinator.request_send_draft(draft),
+            ComposeOperation::SaveDraft => {
+                self.inner.coordinator.request_save_draft(draft);
+            }
+            ComposeOperation::Send => {
+                self.inner.coordinator.request_send_draft(draft);
+            }
         }
     }
 
@@ -1052,10 +1105,12 @@ impl ComposePage {
                 self.finish_account_rebind_or_enable();
                 self.request_next_navigation();
             }
-            Err(error) => self.finish_operation_failure(
-                ComposeOperation::SaveDraft.failure_status(),
-                error,
-            ),
+            Err(error) => {
+                self.finish_operation_failure(
+                    ComposeOperation::SaveDraft.failure_status(),
+                    error,
+                );
+            }
         }
     }
 
@@ -1264,11 +1319,15 @@ fn html_from_text_preserving_signature(
     };
     let after = crate::model::mail::plain_text_to_html(after);
     match html_signature {
-        Some(signature) => format!(
-            "{before}<div {}>{signature}</div>{after}",
-            crate::model::mail::SIGNATURE_REGION_ATTRIBUTE,
-        ),
-        None => format!("{before}{after}"),
+        Some(signature) => {
+            format!(
+                "{before}<div {}>{signature}</div>{after}",
+                crate::model::mail::SIGNATURE_REGION_ATTRIBUTE,
+            )
+        }
+        None => {
+            format!("{before}{after}")
+        }
     }
 }
 

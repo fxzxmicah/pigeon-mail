@@ -118,11 +118,13 @@ impl AccountMailService {
         conversation_limit: usize,
     ) -> AccountMailboxLoad {
         match self.load_mailbox_content(None, conversation_limit) {
-            Ok(content) => AccountMailboxLoad {
-                mode,
-                content,
-                failure: None,
-            },
+            Ok(content) => {
+                AccountMailboxLoad {
+                    mode,
+                    content,
+                    failure: None,
+                }
+            }
             Err(error) => {
                 let failure = crate::failure::classify_failure(&error);
                 crate::logging::report_failure("mailbox-cache-load", &error);

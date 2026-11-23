@@ -1,7 +1,7 @@
 use std::cmp::Ordering;
 use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_int, c_uint, c_ulong, c_void};
-use std::ptr;
+use std::ptr::{self, NonNull};
 use std::sync::Arc;
 
 use anyhow::{Result, anyhow};
@@ -81,34 +81,30 @@ pub(crate) struct AppendMessageRequest<'a> {
 
 enum ESourceRegistry {}
 enum ESource {}
-enum ESourceExtension {}
-enum ESourceLocal {}
 enum CamelSession {}
 enum CamelService {}
 enum CamelStore {}
 enum CamelTransport {}
 enum CamelOfflineStore {}
-enum CamelSettings {}
-enum CamelLocalSettings {}
 enum CamelFolder {}
 enum CamelFolderSummary {}
 enum CamelMessageInfo {}
 enum CamelMimeMessage {}
 enum CamelInternetAddress {}
 
-struct OwnedPtrArray(*mut glib::ffi::GPtrArray);
+struct OwnedPtrArray(NonNull<glib::ffi::GPtrArray>);
 
 impl OwnedPtrArray {
     unsafe fn from_ptr(pointer: *mut glib::ffi::GPtrArray) -> Option<Self> {
-        (!pointer.is_null()).then_some(Self(pointer))
+        NonNull::new(pointer).map(Self)
     }
 
     fn as_ptr(&self) -> *mut glib::ffi::GPtrArray {
-        self.0
+        self.0.as_ptr()
     }
 
     fn len(&self) -> usize {
-        unsafe { (*self.0).len as usize }
+        unsafe { self.0.as_ref().len as usize }
     }
 
     fn is_empty(&self) -> bool {
@@ -120,7 +116,7 @@ impl OwnedPtrArray {
         if len == 0 {
             return Ok(Vec::new());
         }
-        let values = unsafe { (*self.0).pdata };
+        let values = unsafe { self.0.as_ref().pdata };
         if values.is_null() {
             return Err(anyhow!("GPtrArray contains elements without storage"));
         }
@@ -130,7 +126,7 @@ impl OwnedPtrArray {
 
 impl Drop for OwnedPtrArray {
     fn drop(&mut self) {
-        unsafe { glib::ffi::g_ptr_array_unref(self.0) };
+        unsafe { glib::ffi::g_ptr_array_unref(self.0.as_ptr()) };
     }
 }
 
@@ -291,21 +287,21 @@ struct CamelFolderInfo {
     total: c_int,
 }
 
-struct OwnedFolderInfo(*mut CamelFolderInfo);
+struct OwnedFolderInfo(NonNull<CamelFolderInfo>);
 
 impl OwnedFolderInfo {
     unsafe fn from_ptr(pointer: *mut CamelFolderInfo) -> Option<Self> {
-        (!pointer.is_null()).then_some(Self(pointer))
+        NonNull::new(pointer).map(Self)
     }
 
     fn as_ptr(&self) -> *mut CamelFolderInfo {
-        self.0
+        self.0.as_ptr()
     }
 }
 
 impl Drop for OwnedFolderInfo {
     fn drop(&mut self) {
-        unsafe { camel_folder_info_free(self.0) };
+        unsafe { camel_folder_info_free(self.0.as_ptr()) };
     }
 }
 
@@ -329,7 +325,6 @@ unsafe extern "C" {
         cancellable: *mut gio::ffi::GCancellable,
         error: *mut *mut glib::ffi::GError,
     ) -> glib::ffi::gboolean;
-    fn camel_service_ref_settings(service: *mut CamelService) -> *mut CamelSettings;
     fn camel_service_get_connection_status(service: *mut CamelService) -> c_int;
     fn camel_service_get_user_cache_dir(service: *mut CamelService) -> *const c_char;
     fn camel_store_get_folder_info_sync(
@@ -482,10 +477,6 @@ unsafe extern "C" {
         registry: *mut ESourceRegistry,
         uid: *const c_char,
     ) -> *mut ESource;
-    fn e_source_get_extension(
-        source: *mut ESource,
-        extension_name: *const c_char,
-    ) -> *mut ESourceExtension;
     fn e_source_has_extension(
         source: *mut ESource,
         extension_name: *const c_char,
@@ -494,12 +485,12 @@ unsafe extern "C" {
     fn e_source_get_parent(source: *mut ESource) -> *const c_char;
     fn e_source_camel_get_extension_name(protocol: *const c_char) -> *const c_char;
     fn e_source_camel_configure_service(source: *mut ESource, service: *mut CamelService);
-    fn e_source_local_dup_custom_file(extension: *mut ESourceLocal) -> *mut gio::ffi::GFile;
-    fn g_file_get_path(file: *mut gio::ffi::GFile) -> *mut c_char;
-    fn camel_local_settings_set_path(settings: *mut CamelLocalSettings, path: *const c_char);
     fn camel_url_encode(value: *const c_char, extra: *const c_char) -> *mut c_char;
 
     fn mail_bridge_eds_session_new(registry: *mut ESourceRegistry) -> *mut CamelSession;
+    fn mail_bridge_eds_configure_local_store(
+        service: *mut CamelService,
+    ) -> glib::ffi::gboolean;
     fn mail_bridge_eds_extract_message_bodies(
         message: *mut CamelMimeMessage,
         out_html: *mut *mut c_char,
@@ -619,7 +610,6 @@ impl CamelSessionResources {
         }
         Ok(resources)
     }
-
 }
 
 impl AccountSession {
@@ -669,7 +659,11 @@ impl AccountSession {
                 CAMEL_PROVIDER_STORE,
                 matches!(mode, CamelAccessMode::Online),
             )?;
-            configure_local_store_path(resources.config_source, resources.service)?;
+            if matches!(mode, CamelAccessMode::Local)
+                && mail_bridge_eds_configure_local_store(resources.service) == 0
+            {
+                return Err(anyhow!("could not configure the built-in local Camel store"));
+            }
             let mut this = Self {
                 account_uid,
                 backend_name,
@@ -683,7 +677,9 @@ impl AccountSession {
                 CamelAccessMode::CachedOnly | CamelAccessMode::Local => {
                     this.ensure_store_offline()?
                 }
-                CamelAccessMode::Online => this.ensure_connected()?,
+                CamelAccessMode::Online => {
+                    this.ensure_connected()?
+                }
             }
             Ok(this)
         }
@@ -1158,47 +1154,6 @@ impl Drop for ChangeMonitor {
     }
 }
 
-unsafe fn configure_local_store_path(
-    source: *mut ESource,
-    service: *mut CamelService,
-) -> Result<()> {
-    const EXTENSION_LOCAL_BACKEND: &str = "Local Backend";
-
-    if !unsafe { source_has_extension(source, EXTENSION_LOCAL_BACKEND) } {
-        return Ok(());
-    }
-
-    let extension_name = CString::new(EXTENSION_LOCAL_BACKEND)
-        .map_err(|_| anyhow!("local extension name contains interior NUL"))?;
-    let extension =
-        unsafe { e_source_get_extension(source, extension_name.as_ptr()) } as *mut ESourceLocal;
-    if extension.is_null() {
-        return Ok(());
-    }
-
-    let Some(file) = (unsafe {
-        OwnedGObject::from_ptr(e_source_local_dup_custom_file(extension))
-    }) else {
-        return Ok(());
-    };
-
-    let Some(path) = (unsafe { OwnedGlibString::from_ptr(g_file_get_path(file.as_ptr())) }) else {
-        return Ok(());
-    };
-
-    if let Some(settings) = unsafe {
-        OwnedGObject::from_ptr(camel_service_ref_settings(service))
-    } {
-        unsafe {
-            camel_local_settings_set_path(
-                settings.as_ptr() as *mut CamelLocalSettings,
-                path.as_ptr(),
-            )
-        };
-    }
-    Ok(())
-}
-
 pub(crate) fn folder_uri(service_uid: &str, folder_id: &FolderId) -> Result<String> {
     Ok(format!(
         "folder://{}/{}",
@@ -1346,8 +1301,12 @@ fn backend_extension_name(backend_name: &str) -> Option<String> {
 
 unsafe fn source_has_extension(source: *mut ESource, extension_name: &str) -> bool {
     let extension_name = match CString::new(extension_name) {
-        Ok(value) => value,
-        Err(_) => return false,
+        Ok(value) => {
+            value
+        }
+        Err(_) => {
+            return false;
+        }
     };
     unsafe { e_source_has_extension(source, extension_name.as_ptr()) != 0 }
 }
@@ -2349,10 +2308,16 @@ unsafe fn load_folder_tree(store: *mut CamelStore) -> Result<Vec<MailFolder>> {
             &mut error,
         )
     };
-    let info = unsafe { OwnedFolderInfo::from_ptr(info) }.ok_or_else(|| {
-        take_gerror(error)
-            .unwrap_or_else(|| anyhow!("camel_store_get_folder_info_sync returned NULL"))
-    })?;
+    let Some(info) = (unsafe { OwnedFolderInfo::from_ptr(info) }) else {
+        return match take_gerror(error) {
+            Some(error) => {
+                Err(error)
+            }
+            None => {
+                Ok(Vec::new())
+            }
+        };
+    };
 
     let mut folders = Vec::new();
     collect_folder_info(info.as_ptr(), &mut folders)?;
@@ -2391,14 +2356,30 @@ fn collect_folder_info(
 
 fn classify_folder_kind(flags: c_uint) -> FolderKind {
     match flags & CAMEL_FOLDER_TYPE_MASK {
-        CAMEL_FOLDER_TYPE_INBOX => FolderKind::Inbox,
-        CAMEL_FOLDER_TYPE_OUTBOX => FolderKind::Outbox,
-        CAMEL_FOLDER_TYPE_DRAFTS => FolderKind::Drafts,
-        CAMEL_FOLDER_TYPE_SENT => FolderKind::Sent,
-        CAMEL_FOLDER_TYPE_ARCHIVE => FolderKind::Archive,
-        CAMEL_FOLDER_TYPE_TRASH => FolderKind::Trash,
-        CAMEL_FOLDER_TYPE_JUNK => FolderKind::Spam,
-        _ => FolderKind::Custom,
+        CAMEL_FOLDER_TYPE_INBOX => {
+            FolderKind::Inbox
+        }
+        CAMEL_FOLDER_TYPE_OUTBOX => {
+            FolderKind::Outbox
+        }
+        CAMEL_FOLDER_TYPE_DRAFTS => {
+            FolderKind::Drafts
+        }
+        CAMEL_FOLDER_TYPE_SENT => {
+            FolderKind::Sent
+        }
+        CAMEL_FOLDER_TYPE_ARCHIVE => {
+            FolderKind::Archive
+        }
+        CAMEL_FOLDER_TYPE_TRASH => {
+            FolderKind::Trash
+        }
+        CAMEL_FOLDER_TYPE_JUNK => {
+            FolderKind::Spam
+        }
+        _ => {
+            FolderKind::Custom
+        }
     }
 }
 
@@ -2410,14 +2391,30 @@ fn compare_folders(left: &MailFolder, right: &MailFolder) -> Ordering {
 
 fn folder_rank(kind: FolderKind) -> usize {
     match kind {
-        FolderKind::Inbox => 0,
-        FolderKind::Drafts => 1,
-        FolderKind::Outbox => 2,
-        FolderKind::Sent => 3,
-        FolderKind::Archive => 4,
-        FolderKind::Trash => 5,
-        FolderKind::Spam => 6,
-        FolderKind::Custom => 7,
+        FolderKind::Inbox => {
+            0
+        }
+        FolderKind::Drafts => {
+            1
+        }
+        FolderKind::Outbox => {
+            2
+        }
+        FolderKind::Sent => {
+            3
+        }
+        FolderKind::Archive => {
+            4
+        }
+        FolderKind::Trash => {
+            5
+        }
+        FolderKind::Spam => {
+            6
+        }
+        FolderKind::Custom => {
+            7
+        }
     }
 }
 
@@ -2507,10 +2504,18 @@ unsafe fn address_list_strings(addresses: *mut CamelInternetAddress) -> Vec<Stri
         let name = cstr_to_string(name_ptr).unwrap_or_default();
         let email = cstr_to_string(email_ptr).unwrap_or_default();
         let value = match (name.trim(), email.trim()) {
-            ("", "") => None,
-            ("", email) => Some(email.to_string()),
-            (name, "") => Some(name.to_string()),
-            (name, email) => Some(format!("{name} <{email}>")),
+            ("", "") => {
+                None
+            }
+            ("", email) => {
+                Some(email.to_string())
+            }
+            (name, "") => {
+                Some(name.to_string())
+            }
+            (name, email) => {
+                Some(format!("{name} <{email}>"))
+            }
         };
         if let Some(value) = value {
             result.push(value);

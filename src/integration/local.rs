@@ -36,34 +36,60 @@ pub(crate) enum LocalFolder {
 impl LocalFolder {
     pub(crate) fn name(self) -> &'static str {
         match self {
-            Self::Drafts => "Drafts",
-            Self::Outbox => "Outbox",
-            Self::Sent => "Sent",
+            Self::Drafts => {
+                "Drafts"
+            }
+            Self::Outbox => {
+                "Outbox"
+            }
+            Self::Sent => {
+                "Sent"
+            }
         }
     }
 
     pub(crate) fn kind(self) -> FolderKind {
         match self {
-            Self::Drafts => FolderKind::Drafts,
-            Self::Outbox => FolderKind::Outbox,
-            Self::Sent => FolderKind::Sent,
+            Self::Drafts => {
+                FolderKind::Drafts
+            }
+            Self::Outbox => {
+                FolderKind::Outbox
+            }
+            Self::Sent => {
+                FolderKind::Sent
+            }
         }
     }
 
     fn display_name(self) -> String {
         match self {
-            Self::Drafts => gettext("Drafts"),
-            Self::Outbox => gettext("Outbox"),
-            Self::Sent => gettext("Sent"),
+            Self::Drafts => {
+                gettext("Drafts")
+            }
+            Self::Outbox => {
+                gettext("Outbox")
+            }
+            Self::Sent => {
+                gettext("Sent")
+            }
         }
     }
 
     fn from_kind(kind: FolderKind) -> Option<Self> {
         match kind {
-            FolderKind::Drafts => Some(Self::Drafts),
-            FolderKind::Outbox => Some(Self::Outbox),
-            FolderKind::Sent => Some(Self::Sent),
-            _ => None,
+            FolderKind::Drafts => {
+                Some(Self::Drafts)
+            }
+            FolderKind::Outbox => {
+                Some(Self::Outbox)
+            }
+            FolderKind::Sent => {
+                Some(Self::Sent)
+            }
+            _ => {
+                None
+            }
         }
     }
 }
@@ -156,9 +182,15 @@ impl<'a> LocalMailbox<'a> {
         folder: LocalFolder,
     ) -> anyhow::Result<Vec<ConversationSummary>> {
         match folder {
-            LocalFolder::Drafts => self.load_drafts(),
-            LocalFolder::Outbox => Ok(self.load_outbox_projection()?.outbox),
-            LocalFolder::Sent => self.load_sent_projection(),
+            LocalFolder::Drafts => {
+                self.load_drafts()
+            }
+            LocalFolder::Outbox => {
+                Ok(self.load_outbox_projection()?.outbox)
+            }
+            LocalFolder::Sent => {
+                self.load_sent_projection()
+            }
         }
     }
 
@@ -475,7 +507,9 @@ impl<'a> LocalMailbox<'a> {
                     session.move_message(&record.summary.id, &sent_folder_id)?;
                 }
                 DeliveryState::SubmissionUncertain => {}
-                DeliveryState::Queued => submissions.push(record),
+                DeliveryState::Queued => {
+                    submissions.push(record);
+                }
             }
         }
 
@@ -683,7 +717,9 @@ impl<'a> LocalMailbox<'a> {
             session.set_draft_superseded(previous_id, true)?;
         }
         let stored = match session.append_message(&request) {
-            Ok(stored) => stored,
+            Ok(stored) => {
+                stored
+            }
             Err(error) => {
                 if let Some(previous_id) = superseded_draft.as_ref()
                     && let Err(error) = session.set_draft_superseded(previous_id, false)

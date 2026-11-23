@@ -94,7 +94,9 @@ pub(super) fn load_notification_snapshot(
     let mut snapshots = Vec::with_capacity(folders.len());
     for folder in folders {
         let conversations = match service.list_conversations(&folder.id, 0, 256) {
-            Ok(conversations) => Some(conversations),
+            Ok(conversations) => {
+                Some(conversations)
+            }
             Err(error) => {
                 crate::logging::report_deferred("new-mail-folder-snapshot", &error);
                 None

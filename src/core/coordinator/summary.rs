@@ -35,8 +35,12 @@ pub(super) enum MailboxReadJob {
 impl MailboxReadJob {
     fn account_id(&self) -> &MailAccountId {
         match self {
-            Self::ThreadPage(job) => job.service.account_id(),
-            Self::Reload(job) => job.service.account_id(),
+            Self::ThreadPage(job) => {
+                job.service.account_id()
+            }
+            Self::Reload(job) => {
+                job.service.account_id()
+            }
         }
     }
 }
@@ -81,8 +85,12 @@ impl MailCoordinator {
         std::thread::spawn(move || loop {
             let account_id = job.account_id().clone();
             match job {
-                MailboxReadJob::ThreadPage(job) => coordinator.run_thread_page(job),
-                MailboxReadJob::Reload(job) => coordinator.run_mailbox_reload(job),
+                MailboxReadJob::ThreadPage(job) => {
+                    coordinator.run_thread_page(job);
+                }
+                MailboxReadJob::Reload(job) => {
+                    coordinator.run_mailbox_reload(job);
+                }
             }
             let Some(next) = coordinator.state.mailbox_reads.finish(&account_id) else {
                 break;

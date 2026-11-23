@@ -33,6 +33,11 @@
   </categories>
   <content_rating type="oars-1.1"/>
   <releases its:translate="no">
+    <release version="0.2.3" date="2026-11-23">
+      <description>
+        <p>Align local mailbox storage and native ownership with the current Evolution Data Server stack, handle empty caches correctly, and modernize settings and loading interfaces.</p>
+      </description>
+    </release>
     <release version="0.2.2" date="2026-09-18">
       <description>
         <p>Restore translations in packaged installations.</p>

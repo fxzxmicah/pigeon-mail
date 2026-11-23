@@ -65,11 +65,15 @@ impl AccountRuntime {
     pub fn initial_catalog(&self) -> AccountBootstrap {
         let settings = self.settings_store.load();
         match self.seed_for_settings(settings.clone()) {
-            Ok(seed) => AccountBootstrap::Ready(seed),
-            Err(error) => AccountBootstrap::Unavailable {
-                seed: Self::unavailable_seed(settings),
-                error,
-            },
+            Ok(seed) => {
+                AccountBootstrap::Ready(seed)
+            }
+            Err(error) => {
+                AccountBootstrap::Unavailable {
+                    seed: Self::unavailable_seed(settings),
+                    error,
+                }
+            }
         }
     }
 

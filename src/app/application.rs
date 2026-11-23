@@ -92,7 +92,9 @@ fn build_application() -> adw::Application {
                     session_for_open.compose(app, request);
                     opened = true;
                 }
-                Err(error) => crate::logging::report_invalid_input("mailto-open", &error),
+                Err(error) => {
+                    crate::logging::report_invalid_input("mailto-open", &error);
+                }
             }
         }
         if !opened {
@@ -186,7 +188,9 @@ fn ensure_main_window(
         match receiver.await {
             Ok((registry_invalidations, bootstrap)) => {
                 let seed = match bootstrap {
-                    AccountBootstrap::Ready(seed) => seed,
+                    AccountBootstrap::Ready(seed) => {
+                        seed
+                    }
                     AccountBootstrap::Unavailable { seed, error } => {
                         crate::logging::report_failure("mailbox-initialization", &error);
                         seed
@@ -198,12 +202,14 @@ fn ensure_main_window(
                     seed.mode,
                 ));
                 match registry_invalidations {
-                    Ok(registry_invalidations) => watch_account_registry(
-                        &window_for_bootstrap,
-                        &runtime_for_registry,
-                        &coordinator_for_registry,
-                        registry_invalidations,
-                    ),
+                    Ok(registry_invalidations) => {
+                        watch_account_registry(
+                            &window_for_bootstrap,
+                            &runtime_for_registry,
+                            &coordinator_for_registry,
+                            registry_invalidations,
+                        );
+                    }
                     Err(error) => {
                         crate::logging::report_deferred("eds-registry-monitor", &error)
                     }

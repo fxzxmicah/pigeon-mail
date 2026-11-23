@@ -44,11 +44,15 @@ pub(super) enum MailboxWriteKey {
 impl MailboxWriteJob {
     fn key(&self) -> MailboxWriteKey {
         match self {
-            Self::MessageAction(job) => MailboxWriteKey::Message(
-                job.service.account_id().clone(),
-                job.conversation_id.clone(),
-            ),
-            Self::Draft(job) => MailboxWriteKey::Draft(job.service.account_id().clone()),
+            Self::MessageAction(job) => {
+                MailboxWriteKey::Message(
+                    job.service.account_id().clone(),
+                    job.conversation_id.clone(),
+                )
+            }
+            Self::Draft(job) => {
+                MailboxWriteKey::Draft(job.service.account_id().clone())
+            }
         }
     }
 }
@@ -112,12 +116,16 @@ impl MailCoordinator {
         let service_router = self.service();
         let Some(service) = service_router.lease_account(&draft.account_id) else {
             match operation {
-                DraftWrite::Save => self.publish(MailEvent::DraftSaveCompleted {
-                    result: Err(gettext("Draft not saved.")),
-                }),
-                DraftWrite::Send => self.publish(MailEvent::SendCompleted {
-                    result: Err(gettext("Message not sent.")),
-                }),
+                DraftWrite::Save => {
+                    self.publish(MailEvent::DraftSaveCompleted {
+                        result: Err(gettext("Draft not saved.")),
+                    });
+                }
+                DraftWrite::Send => {
+                    self.publish(MailEvent::SendCompleted {
+                        result: Err(gettext("Message not sent.")),
+                    });
+                }
             }
             return;
         };
@@ -146,8 +154,12 @@ impl MailCoordinator {
         std::thread::spawn(move || loop {
             let key = job.key();
             match job {
-                MailboxWriteJob::MessageAction(job) => coordinator.run_message_action(job),
-                MailboxWriteJob::Draft(job) => coordinator.run_draft_write(job),
+                MailboxWriteJob::MessageAction(job) => {
+                    coordinator.run_message_action(job);
+                }
+                MailboxWriteJob::Draft(job) => {
+                    coordinator.run_draft_write(job);
+                }
             }
             let Some(next) = coordinator.state.mailbox_writes.finish(&key) else {
                 break;

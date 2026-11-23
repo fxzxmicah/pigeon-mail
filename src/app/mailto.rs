@@ -28,13 +28,21 @@ pub fn parse(uri: &str) -> anyhow::Result<MailtoRequest> {
         let name = decode_component(name)?;
         let value = decode_component(value)?;
         match name.to_ascii_lowercase().as_str() {
-            "to" => append_recipients(&mut request.to, &value),
-            "cc" => append_recipients(&mut request.cc, &value),
-            "bcc" => append_recipients(&mut request.bcc, &value),
+            "to" => {
+                append_recipients(&mut request.to, &value);
+            }
+            "cc" => {
+                append_recipients(&mut request.cc, &value);
+            }
+            "bcc" => {
+                append_recipients(&mut request.bcc, &value);
+            }
             "subject" if request.subject.is_empty() => {
                 request.subject = single_line(&value);
             }
-            "body" if request.body.is_empty() => request.body = value,
+            "body" if request.body.is_empty() => {
+                request.body = value;
+            }
             _ => {}
         }
     }

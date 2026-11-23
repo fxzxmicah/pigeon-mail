@@ -1,7 +1,6 @@
 mod state;
 
 use adw::prelude::*;
-use gtk::glib;
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
@@ -66,10 +65,6 @@ impl SettingsSaveState {
         completed(result);
         true
     }
-
-    fn is_saving(&self) -> bool {
-        self.active.borrow().is_some()
-    }
 }
 
 type SharedSettingsDraftState = Rc<RefCell<SettingsDraftState>>;
@@ -77,7 +72,7 @@ type SharedSettingsDraftState = Rc<RefCell<SettingsDraftState>>;
 #[derive(Clone)]
 struct SettingsMainView {
     account: gtk::DropDown,
-    name: gtk::Entry,
+    name: adw::EntryRow,
     aliases: gtk::ListBox,
     edit: gtk::Button,
     remove: gtk::Button,
@@ -151,9 +146,9 @@ impl SettingsMainView {
 #[derive(Clone)]
 struct AliasEditorView {
     page: adw::NavigationPage,
-    name: gtk::Entry,
-    address: gtk::Entry,
-    reply_to: gtk::Entry,
+    name: adw::EntryRow,
+    address: adw::EntryRow,
+    reply_to: adw::EntryRow,
     composer: Rc<WebKitComposer>,
     text: gtk::TextView,
 }
@@ -183,7 +178,7 @@ impl AliasEditorView {
 
 #[derive(Clone)]
 pub(super) struct SettingsDialog {
-    inner: adw::Window,
+    inner: adw::Dialog,
     saves: SettingsSaveState,
     mailbox: Rc<RefCell<MailboxViewModel>>,
     state: SharedSettingsDraftState,
@@ -192,8 +187,8 @@ pub(super) struct SettingsDialog {
 }
 
 impl SettingsDialog {
-    pub(super) fn present(&self) {
-        self.inner.present();
+    pub(super) fn present(&self, parent: &impl IsA<gtk::Widget>) {
+        self.inner.present(Some(parent));
     }
 
     pub(super) fn finish_save(
@@ -204,16 +199,8 @@ impl SettingsDialog {
         self.saves.finish(request_id, result)
     }
 
-    pub(super) fn connect_close(&self, closed: impl Fn() + 'static) {
-        let saves = self.saves.clone();
-        self.inner.connect_close_request(move |_| {
-            if saves.is_saving() {
-                glib::Propagation::Stop
-            } else {
-                closed();
-                glib::Propagation::Proceed
-            }
-        });
+    pub(super) fn connect_closed(&self, closed: impl Fn() + 'static) {
+        self.inner.connect_closed(move |_| closed());
     }
 
     pub(super) fn mailbox_changed(&self) {
@@ -231,16 +218,13 @@ impl SettingsDialog {
 }
 
 pub(super) fn build_settings(
-    parent: &adw::ApplicationWindow,
     mailbox_state: Rc<RefCell<MailboxViewModel>>,
     coordinator: MailCoordinator,
 ) -> SettingsDialog {
-    let window = adw::Window::builder()
-        .transient_for(parent)
-        .modal(true)
+    let dialog = adw::Dialog::builder()
         .title(gettext("Mail Settings"))
-        .default_width(640)
-        .default_height(560)
+        .content_width(640)
+        .content_height(560)
         .build();
     let initial = mailbox_state.borrow().selected_account_index();
     let accounts = mailbox_state.borrow().accounts().to_vec();
@@ -248,14 +232,12 @@ pub(super) fn build_settings(
     let saves = SettingsSaveState::default();
 
     let account_dropdown = gtk::DropDown::new(None::<gtk::StringList>, None::<gtk::Expression>);
-    let account_name_entry = gtk::Entry::builder().hexpand(true).build();
-    let account_name_label = gtk::Label::builder()
-        .label(gettext("Account _Name"))
+    let account_name_row = adw::EntryRow::builder()
+        .title(gettext("Account _Name"))
         .use_underline(true)
-        .xalign(0.0)
-        .css_classes(["mail-form-label"])
         .build();
-    account_name_label.set_mnemonic_widget(Some(&account_name_entry));
+    let account_group = adw::PreferencesGroup::new();
+    account_group.add(&account_name_row);
 
     let alias_list = gtk::ListBox::builder().css_classes(["boxed-list"]).build();
     let add_alias_button = gtk::Button::with_label(&gettext("Add"));
@@ -293,26 +275,31 @@ pub(super) fn build_settings(
         .margin_start(14)
         .margin_end(14)
         .build();
-    let name_row = gtk::Grid::builder().column_spacing(12).build();
-    name_row.attach(&account_name_label, 0, 0, 1, 1);
-    name_row.attach(&account_name_entry, 1, 0, 1, 1);
-    let alias_header = gtk::Label::builder()
-        .label(gettext("Aliases"))
-        .xalign(0.0)
-        .css_classes(["title-3"])
-        .margin_top(4)
+    let alias_group = adw::PreferencesGroup::builder()
+        .title(gettext("Aliases"))
         .build();
-    main_page.append(&name_row);
-    main_page.append(&alias_header);
-    main_page.append(&alias_frame);
-    main_page.append(&alias_actions);
+    alias_group.add(&alias_frame);
+    alias_group.add(&alias_actions);
+    main_page.append(&account_group);
+    main_page.append(&alias_group);
 
-    let username_entry = gtk::Entry::builder().hexpand(true).build();
-    let email_entry = gtk::Entry::builder().hexpand(true).build();
-    let reply_to_entry = gtk::Entry::builder()
-        .placeholder_text(gettext("Optional Reply-To"))
-        .hexpand(true)
+    let name_row = adw::EntryRow::builder()
+        .title(gettext("_Name"))
+        .use_underline(true)
         .build();
+    let address_row = adw::EntryRow::builder()
+        .title(gettext("_Address"))
+        .use_underline(true)
+        .input_purpose(gtk::InputPurpose::Email)
+        .build();
+    let reply_to_row = adw::EntryRow::builder()
+        .title(gettext("Optional Reply-To"))
+        .input_purpose(gtk::InputPurpose::Email)
+        .build();
+    let identity_group = adw::PreferencesGroup::new();
+    identity_group.add(&name_row);
+    identity_group.add(&address_row);
+    identity_group.add(&reply_to_row);
     let DualFormatEditor {
         composer: signature_composer,
         text_editor: signature_text_editor,
@@ -333,26 +320,6 @@ pub(super) fn build_settings(
         .css_classes(["suggested-action"])
         .halign(gtk::Align::End)
         .build();
-    let editor_form = gtk::Grid::builder()
-        .hexpand(true)
-        .row_spacing(8)
-        .column_spacing(12)
-        .build();
-    for (row, label_text, entry) in [
-        (0, gettext("_Name"), &username_entry),
-        (1, gettext("_Address"), &email_entry),
-        (2, gettext("_Reply-To"), &reply_to_entry),
-    ] {
-        let label = gtk::Label::builder()
-            .label(&label_text)
-            .use_underline(true)
-            .xalign(0.0)
-            .css_classes(["mail-form-label"])
-            .build();
-        label.set_mnemonic_widget(Some(entry));
-        editor_form.attach(&label, 0, row, 1, 1);
-        editor_form.attach(entry, 1, row, 1, 1);
-    }
     let edit_page = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
         .spacing(14)
@@ -361,7 +328,7 @@ pub(super) fn build_settings(
         .margin_start(14)
         .margin_end(14)
         .build();
-    edit_page.append(&editor_form);
+    edit_page.append(&identity_group);
     edit_page.append(&signature_section);
     edit_page.append(&apply_alias_button);
 
@@ -397,11 +364,11 @@ pub(super) fn build_settings(
     navigation.add(&editor_navigation_page);
     let toast_overlay = adw::ToastOverlay::new();
     toast_overlay.set_child(Some(&navigation));
-    window.set_content(Some(&toast_overlay));
+    dialog.set_child(Some(&toast_overlay));
 
     let main_view = SettingsMainView {
         account: account_dropdown.clone(),
-        name: account_name_entry.clone(),
+        name: account_name_row.clone(),
         aliases: alias_list.clone(),
         edit: edit_alias_button.clone(),
         remove: remove_alias_button.clone(),
@@ -410,9 +377,9 @@ pub(super) fn build_settings(
     };
     let editor_view = AliasEditorView {
         page: editor_navigation_page.clone(),
-        name: username_entry.clone(),
-        address: email_entry.clone(),
-        reply_to: reply_to_entry.clone(),
+        name: name_row.clone(),
+        address: address_row.clone(),
+        reply_to: reply_to_row.clone(),
         composer: Rc::clone(&signature_composer),
         text: signature_text_editor.clone(),
     };
@@ -423,20 +390,20 @@ pub(super) fn build_settings(
         main_view.refresh(&snapshot);
     }
 
-    let state_for_entry = Rc::clone(&state);
-    let main_view_for_entry = main_view.clone();
-    let dropdown_for_entry = account_dropdown.clone();
-    account_name_entry.connect_changed(move |entry| {
-        if main_view_for_entry.is_projecting() {
+    let state_for_name = Rc::clone(&state);
+    let view_for_name = main_view.clone();
+    let dropdown_for_name = account_dropdown.clone();
+    account_name_row.connect_changed(move |row| {
+        if view_for_name.is_projecting() {
             return;
         }
-        let name = entry.text().to_string();
-        let mut state = state_for_entry.borrow_mut();
+        let name = row.text().to_string();
+        let mut state = state_for_name.borrow_mut();
         let Some(selected) = state.rename_selected(name.clone()) else {
             return;
         };
         drop(state);
-        if let Some(names) = dropdown_for_entry.model()
+        if let Some(names) = dropdown_for_name.model()
             .and_then(|model| model.downcast::<gtk::StringList>().ok())
         {
             names.splice(selected as u32, 1, &[&name]);
@@ -535,8 +502,8 @@ pub(super) fn build_settings(
         editor_for_add.name.grab_focus();
     });
     let apply_for_validation = apply_alias_button.clone();
-    email_entry.connect_changed(move |entry| {
-        apply_for_validation.set_sensitive(!entry.text().trim().is_empty());
+    address_row.connect_changed(move |row| {
+        apply_for_validation.set_sensitive(!row.text().trim().is_empty());
     });
 
     let state_for_apply = Rc::clone(&state);
@@ -619,22 +586,30 @@ pub(super) fn build_settings(
     let coordinator_for_save = coordinator.clone();
     let nav_for_save = navigation.clone();
     let toast_for_save = toast_overlay.clone();
+    let dialog_for_save = dialog.clone();
     save_button.connect_clicked(move |_| {
         let accounts = state_for_save.borrow().accounts_to_save();
         let Some(accounts) = accounts else {
             toast_for_save.add_toast(adw::Toast::new(&gettext("Account name is empty.")));
             return;
         };
+        dialog_for_save.set_can_close(false);
         nav_for_save.set_sensitive(false);
         let nav = nav_for_save.clone();
         let toast = toast_for_save.clone();
         let state = Rc::clone(&state_for_save);
+        let dialog = dialog_for_save.clone();
         let submitted = accounts.clone();
         saves_for_save.request(&coordinator_for_save, accounts, move |result| {
+            dialog.set_can_close(true);
             nav.set_sensitive(true);
             match result {
-                Ok(()) => state.borrow_mut().record_saved(submitted),
-                Err(message) => toast.add_toast(adw::Toast::new(&message)),
+                Ok(()) => {
+                    state.borrow_mut().record_saved(submitted);
+                }
+                Err(message) => {
+                    toast.add_toast(adw::Toast::new(&message));
+                }
             }
         });
     });
@@ -647,7 +622,7 @@ pub(super) fn build_settings(
     });
 
     SettingsDialog {
-        inner: window,
+        inner: dialog,
         saves,
         mailbox: mailbox_state,
         state,

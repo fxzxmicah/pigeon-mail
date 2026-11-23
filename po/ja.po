@@ -501,9 +501,6 @@ msgstr "差出人(_F)"
 msgid "_Name"
 msgstr "名前(_N)"
 
-msgid "_Reply-To"
-msgstr "返信先(_R)"
-
 msgid "_Subject"
 msgstr "件名(_S)"
 

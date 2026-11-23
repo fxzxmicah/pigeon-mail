@@ -22,7 +22,6 @@ pub(super) struct PreviewWidgets {
     reply_to_value: gtk::Label,
     additional_headers_toggle: gtk::ToggleButton,
     attachments_list: gtk::ListBox,
-    loading_spinner: gtk::Spinner,
     error_page: adw::StatusPage,
     pub(super) reply_button: gtk::Button,
     pub(super) reply_all_button: gtk::Button,
@@ -112,10 +111,9 @@ impl PreviewWidgets {
             .css_classes(["compact-list-frame"])
             .child(&attachment_viewport)
             .build();
-        let loading_spinner = gtk::Spinner::new();
+        let loading_spinner = adw::Spinner::new();
         loading_spinner.set_halign(gtk::Align::Center);
         loading_spinner.add_css_class("mailbox-loading-spinner");
-        loading_spinner.start();
         let loading_title = gtk::Label::builder()
             .css_classes(["title-3"])
             .label(gettext("Loading message"))
@@ -322,7 +320,6 @@ impl PreviewWidgets {
             reply_to_value,
             additional_headers_toggle,
             attachments_list,
-            loading_spinner,
             error_page,
             reply_button,
             reply_all_button,
@@ -355,8 +352,12 @@ impl PreviewWidgets {
 
     pub(super) fn refresh_content(&self, content: &state::PreviewContent) {
         let detail = match content {
-            state::PreviewContent::Loaded(detail) => Some(detail),
-            _ => None,
+            state::PreviewContent::Loaded(detail) => {
+                Some(detail)
+            }
+            _ => {
+                None
+            }
         };
         let current_conversation = self
             .loaded_html
@@ -541,26 +542,26 @@ impl PreviewWidgets {
             *self.loaded_html.borrow_mut() = None;
             self.body.buffer().set_text("");
             let error = match content {
-                state::PreviewContent::Failed(error) => Some(error.as_str()),
-                _ => None,
+                state::PreviewContent::Failed(error) => {
+                    Some(error.as_str())
+                }
+                _ => {
+                    None
+                }
             };
             self.error_page.set_description(error);
         }
         match content {
             state::PreviewContent::Loading => {
-                self.loading_spinner.start();
                 self.state_stack.set_visible_child_name("loading");
             }
             state::PreviewContent::Loaded(_) => {
-                self.loading_spinner.stop();
                 self.state_stack.set_visible_child_name("message");
             }
             state::PreviewContent::Failed(_) => {
-                self.loading_spinner.stop();
                 self.state_stack.set_visible_child_name("error");
             }
             state::PreviewContent::Empty => {
-                self.loading_spinner.stop();
                 self.state_stack.set_visible_child_name("empty");
             }
         }

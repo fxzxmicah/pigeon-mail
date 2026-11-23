@@ -135,11 +135,15 @@ impl AccountRefreshJob {
                 Some(index) if !self.batches[index].convergence.is_empty() => {
                     self.batches[index].retry_after = None;
                 }
-                Some(index) => self.batches[index] = newer_batch,
+                Some(index) => {
+                    self.batches[index] = newer_batch;
+                }
                 None if newer_batch.convergence.is_empty() => {
                     self.batches.insert(0, newer_batch);
                 }
-                None => self.batches.push(newer_batch),
+                None => {
+                    self.batches.push(newer_batch);
+                }
             }
         }
     }
@@ -193,11 +197,15 @@ impl AccountRefreshBatch {
 
     pub(super) fn resolve(self) -> anyhow::Result<ResolvedRefreshBatch> {
         let service = match self.source {
-            AccountRefreshSource::Leased(service) => service,
+            AccountRefreshSource::Leased(service) => {
+                service
+            }
             AccountRefreshSource::Activate {
                 service,
                 account_id,
-            } => service.activate_account_service(&account_id)?,
+            } => {
+                service.activate_account_service(&account_id)?
+            }
         };
         Ok(ResolvedRefreshBatch {
             service,
@@ -219,16 +227,24 @@ impl AccountRefreshBatch {
                     service: right_service,
                     account_id: right_account,
                 },
-            ) => left_account == right_account && left_service.same_router(right_service),
-            _ => false,
+            ) => {
+                left_account == right_account && left_service.same_router(right_service)
+            }
+            _ => {
+                false
+            }
         }
     }
 
     fn merge_convergence(&mut self, newer: Self) {
         self.convergence.merge(newer.convergence);
         self.retry_after = match (self.retry_after, newer.retry_after) {
-            (Some(current), Some(newer)) => Some(current.min(newer)),
-            _ => None,
+            (Some(current), Some(newer)) => {
+                Some(current.min(newer))
+            }
+            _ => {
+                None
+            }
         };
     }
 }
@@ -236,8 +252,12 @@ impl AccountRefreshBatch {
 impl AccountRefreshSource {
     fn account_id(&self) -> &MailAccountId {
         match self {
-            Self::Leased(service) => service.account_id(),
-            Self::Activate { account_id, .. } => account_id,
+            Self::Leased(service) => {
+                service.account_id()
+            }
+            Self::Activate { account_id, .. } => {
+                account_id
+            }
         }
     }
 }
@@ -298,8 +318,12 @@ impl MailCoordinator {
     pub(super) fn account_refresh_job(&self, account_id: &MailAccountId) -> AccountRefreshJob {
         let service = self.service();
         match service.lease_account(account_id) {
-            Some(service) => AccountRefreshJob::leased(service),
-            None => AccountRefreshJob::activating(service, account_id.clone()),
+            Some(service) => {
+                AccountRefreshJob::leased(service)
+            }
+            None => {
+                AccountRefreshJob::activating(service, account_id.clone())
+            }
         }
     }
 
@@ -356,7 +380,9 @@ impl MailCoordinator {
             service,
             mut convergence,
         } = match batch.resolve() {
-            Ok(resolved) => resolved,
+            Ok(resolved) => {
+                resolved
+            }
             Err(error) => {
                 crate::logging::report_deferred("mail-account-reactivation", &error);
                 self.publish_foreground_activation_failure(
@@ -378,7 +404,9 @@ impl MailCoordinator {
         }
 
         match result {
-            Ok(outcome) => self.finish_successful_refresh(service, convergence, outcome),
+            Ok(outcome) => {
+                self.finish_successful_refresh(service, convergence, outcome)
+            }
             Err(error) => {
                 crate::logging::report_deferred("mail-refresh", &error);
                 self.publish_foreground_refresh(
@@ -440,7 +468,9 @@ impl MailCoordinator {
                     });
                 }
             }
-            Err(error) => crate::logging::report_deferred("new-mail-snapshot", &error),
+            Err(error) => {
+                crate::logging::report_deferred("new-mail-snapshot", &error);
+            }
             Ok(_) => {}
         }
     }

@@ -39,7 +39,12 @@ pub fn report_invalid_input(operation: &'static str, error: &impl std::fmt::Disp
 
 #[cfg(debug_assertions)]
 fn report_development_detail(operation: &'static str, error: &impl std::fmt::Display) {
-    tracing::debug!(target: "pigeon::development", operation, error = %format_args!("{error:#}"), "development failure detail");
+    tracing::debug!(
+        target: "pigeon::development",
+        operation,
+        error = %format_args!("{error:#}"),
+        "development failure detail"
+    );
 }
 
 #[cfg(not(debug_assertions))]
@@ -47,10 +52,18 @@ fn report_development_detail(_: &'static str, _: &impl std::fmt::Display) {}
 
 fn error_category(error: &anyhow::Error) -> &'static str {
     match crate::failure::classify_failure(error) {
-        crate::model::event::RefreshFailureKind::Connectivity => "connectivity",
-        crate::model::event::RefreshFailureKind::Authentication => "authentication",
-        crate::model::event::RefreshFailureKind::Storage => "storage",
-        crate::model::event::RefreshFailureKind::Backend => "backend",
+        crate::model::event::RefreshFailureKind::Connectivity => {
+            "connectivity"
+        }
+        crate::model::event::RefreshFailureKind::Authentication => {
+            "authentication"
+        }
+        crate::model::event::RefreshFailureKind::Storage => {
+            "storage"
+        }
+        crate::model::event::RefreshFailureKind::Backend => {
+            "backend"
+        }
     }
 }
 

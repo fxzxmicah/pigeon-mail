@@ -471,7 +471,9 @@ mail_bridge_export_attachment_part (CamelMimeMessage *message,
 			return FALSE;
 		}
 
-		stream = camel_stream_fs_new_with_name (path, O_CREAT | O_TRUNC | O_WRONLY, 0600, &export_data->error);
+		stream = camel_stream_fs_new_with_name (
+			path, O_CREAT | O_TRUNC | O_WRONLY, 0600,
+			&export_data->error);
 		if (!stream) {
 			g_free (part_dir);
 			g_free (path);
@@ -479,7 +481,8 @@ mail_bridge_export_attachment_part (CamelMimeMessage *message,
 		}
 
 		content = camel_medium_get_content (CAMEL_MEDIUM (part));
-		if (camel_data_wrapper_decode_to_stream_sync (content, stream, NULL, &export_data->error) == -1) {
+		if (camel_data_wrapper_decode_to_stream_sync (
+			content, stream, NULL, &export_data->error) == -1) {
 			camel_stream_close (stream, NULL, NULL);
 			g_object_unref (stream);
 			g_free (part_dir);
@@ -869,21 +872,49 @@ CamelSession *
 mail_bridge_eds_session_new (ESourceRegistry *registry)
 {
 	EdsCamelSession *session;
+	gchar *user_data_dir;
+	gchar *user_cache_dir;
 
 	g_return_val_if_fail (E_IS_SOURCE_REGISTRY (registry), NULL);
 
+	user_data_dir = g_build_filename (e_get_user_data_dir (), "mail", NULL);
+	user_cache_dir = g_build_filename (e_get_user_cache_dir (), "mail", NULL);
 	session = g_object_new (
 		mail_bridge_eds_session_get_type (),
-		"user-data-dir", e_get_user_data_dir (),
-		"user-cache-dir", e_get_user_cache_dir (),
+		"user-data-dir", user_data_dir,
+		"user-cache-dir", user_cache_dir,
 		"online", TRUE,
 		NULL);
+	g_free (user_cache_dir);
+	g_free (user_data_dir);
 
 	session->registry = g_object_ref (registry);
 	session->credentials_provider =
 		e_source_credentials_provider_new (registry);
 
 	return CAMEL_SESSION (session);
+}
+
+gboolean
+mail_bridge_eds_configure_local_store (CamelService *service)
+{
+	CamelSettings *settings;
+	const gchar *path;
+
+	g_return_val_if_fail (CAMEL_IS_SERVICE (service), FALSE);
+
+	settings = camel_service_ref_settings (service);
+	if (!CAMEL_IS_LOCAL_SETTINGS (settings)) {
+		g_clear_object (&settings);
+		return FALSE;
+	}
+
+	path = camel_service_get_user_data_dir (service);
+	camel_local_settings_set_path (CAMEL_LOCAL_SETTINGS (settings), path);
+
+	g_object_unref (settings);
+
+	return TRUE;
 }
 
 gboolean
@@ -1057,10 +1088,14 @@ mail_bridge_eds_append_text_message (CamelFolder *folder,
 	camel_mime_message_set_message_id (message,
 		message_id && *message_id ? message_id : NULL);
 
-	if (!mail_bridge_message_set_address_header (message, reply_to, camel_mime_message_set_reply_to, error) ||
-	    !mail_bridge_message_set_recipients_header (message, CAMEL_RECIPIENT_TYPE_TO, to_serialized, error) ||
-	    !mail_bridge_message_set_recipients_header (message, CAMEL_RECIPIENT_TYPE_CC, cc_serialized, error) ||
-	    !mail_bridge_message_set_recipients_header (message, CAMEL_RECIPIENT_TYPE_BCC, bcc_serialized, error)) {
+	if (!mail_bridge_message_set_address_header (
+		message, reply_to, camel_mime_message_set_reply_to, error) ||
+	    !mail_bridge_message_set_recipients_header (
+		message, CAMEL_RECIPIENT_TYPE_TO, to_serialized, error) ||
+	    !mail_bridge_message_set_recipients_header (
+		message, CAMEL_RECIPIENT_TYPE_CC, cc_serialized, error) ||
+	    !mail_bridge_message_set_recipients_header (
+		message, CAMEL_RECIPIENT_TYPE_BCC, bcc_serialized, error)) {
 		g_object_unref (message);
 		return FALSE;
 	}

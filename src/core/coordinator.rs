@@ -142,7 +142,6 @@ impl MailCoordinator {
         self.cancel_message_detail_requests(account_id);
         self.state.mailbox_reads.cancel_pending(account_id);
     }
-
 }
 
 #[cfg(test)]
@@ -977,5 +976,4 @@ mod tests {
         assert!(scheduler.begin_cache(job(5)).is_some());
         assert!(scheduler.begin_remote(job(6)).is_some());
     }
-
 }

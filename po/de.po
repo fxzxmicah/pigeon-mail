@@ -501,9 +501,6 @@ msgstr "_Von"
 msgid "_Name"
 msgstr "_Name"
 
-msgid "_Reply-To"
-msgstr "_Antwortadresse"
-
 msgid "_Subject"
 msgstr "_Betreff"
 

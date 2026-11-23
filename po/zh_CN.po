@@ -475,9 +475,6 @@ msgstr "发件人(_F)"
 msgid "_Name"
 msgstr "名称(_N)"
 
-msgid "_Reply-To"
-msgstr "回复地址(_R)"
-
 msgid "_Subject"
 msgstr "主题(_S)"
 

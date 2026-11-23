@@ -10,12 +10,24 @@ pub(crate) fn escape_html_text(text: &str) -> String {
     let mut escaped = String::with_capacity(text.len());
     for character in text.chars() {
         match character {
-            '&' => escaped.push_str("&amp;"),
-            '<' => escaped.push_str("&lt;"),
-            '>' => escaped.push_str("&gt;"),
-            '\'' => escaped.push_str("&apos;"),
-            '"' => escaped.push_str("&quot;"),
-            _ => escaped.push(character),
+            '&' => {
+                escaped.push_str("&amp;");
+            }
+            '<' => {
+                escaped.push_str("&lt;");
+            }
+            '>' => {
+                escaped.push_str("&gt;");
+            }
+            '\'' => {
+                escaped.push_str("&apos;");
+            }
+            '"' => {
+                escaped.push_str("&quot;");
+            }
+            _ => {
+                escaped.push(character);
+            }
         }
     }
     escaped
@@ -105,8 +117,12 @@ pub enum AttachmentLocation {
 impl AttachmentLocation {
     pub fn cached_token(&self) -> Option<&str> {
         match self {
-            Self::CachedToken(token) => Some(token),
-            Self::ExternalUri(_) => None,
+            Self::CachedToken(token) => {
+                Some(token)
+            }
+            Self::ExternalUri(_) => {
+                None
+            }
         }
     }
 }
@@ -188,53 +204,81 @@ pub enum MessageBody {
 impl MessageBody {
     pub fn from_parts(html: String, text: String) -> Self {
         match (html.trim().is_empty(), text.trim().is_empty()) {
-            (true, true) => Self::Empty,
-            (false, true) => Self::Html {
-                presentation_text: html2text::from_read(html.as_bytes(), u16::MAX as usize)
-                    .expect("reading an in-memory HTML body cannot fail")
-                    .trim_end_matches('\n')
-                    .to_string(),
-                html,
-            },
-            (true, false) => Self::Text {
-                presentation_html: plain_text_to_html(&text),
-                text,
-            },
-            (false, false) => Self::Alternative { html, text },
+            (true, true) => {
+                Self::Empty
+            }
+            (false, true) => {
+                Self::Html {
+                    presentation_text: html2text::from_read(html.as_bytes(), u16::MAX as usize)
+                        .expect("reading an in-memory HTML body cannot fail")
+                        .trim_end_matches('\n')
+                        .to_string(),
+                    html,
+                }
+            }
+            (true, false) => {
+                Self::Text {
+                    presentation_html: plain_text_to_html(&text),
+                    text,
+                }
+            }
+            (false, false) => {
+                Self::Alternative { html, text }
+            }
         }
     }
 
     pub fn html_part(&self) -> Option<&str> {
         match self {
-            Self::Html { html, .. } | Self::Alternative { html, .. } => Some(html),
-            Self::Empty | Self::Text { .. } => None,
+            Self::Html { html, .. } | Self::Alternative { html, .. } => {
+                Some(html)
+            }
+            Self::Empty | Self::Text { .. } => {
+                None
+            }
         }
     }
 
     pub fn text_part(&self) -> Option<&str> {
         match self {
-            Self::Text { text, .. } | Self::Alternative { text, .. } => Some(text),
-            Self::Empty | Self::Html { .. } => None,
+            Self::Text { text, .. } | Self::Alternative { text, .. } => {
+                Some(text)
+            }
+            Self::Empty | Self::Html { .. } => {
+                None
+            }
         }
     }
 
     pub fn presentation_html(&self) -> &str {
         match self {
-            Self::Empty => "",
-            Self::Html { html, .. } | Self::Alternative { html, .. } => html,
+            Self::Empty => {
+                ""
+            }
+            Self::Html { html, .. } | Self::Alternative { html, .. } => {
+                html
+            }
             Self::Text {
                 presentation_html, ..
-            } => presentation_html,
+            } => {
+                presentation_html
+            }
         }
     }
 
     pub fn presentation_text(&self) -> &str {
         match self {
-            Self::Empty => "",
+            Self::Empty => {
+                ""
+            }
             Self::Html {
                 presentation_text, ..
-            } => presentation_text,
-            Self::Text { text, .. } | Self::Alternative { text, .. } => text,
+            } => {
+                presentation_text
+            }
+            Self::Text { text, .. } | Self::Alternative { text, .. } => {
+                text
+            }
         }
     }
 }
@@ -409,7 +453,9 @@ impl DraftMessage {
             .attachments
             .into_iter()
             .map(|attachment| match attachment.location {
-                AttachmentLocation::ExternalUri(uri) => Ok(uri),
+                AttachmentLocation::ExternalUri(uri) => {
+                    Ok(uri)
+                }
                 AttachmentLocation::CachedToken(_) => {
                     Err("draft contains an unresolved cached attachment")
                 }

@@ -305,17 +305,33 @@ impl MailboxViewModel {
             .and_then(|account_id| self.refresh_failures.get(&account_id).copied())
         {
             return match failure {
-                RefreshFailureKind::Connectivity => gettext("Offline"),
-                RefreshFailureKind::Authentication => gettext("Authentication failed"),
-                RefreshFailureKind::Storage => gettext("Cache unavailable"),
-                RefreshFailureKind::Backend => gettext("Refresh unavailable"),
+                RefreshFailureKind::Connectivity => {
+                    gettext("Offline")
+                }
+                RefreshFailureKind::Authentication => {
+                    gettext("Authentication failed")
+                }
+                RefreshFailureKind::Storage => {
+                    gettext("Cache unavailable")
+                }
+                RefreshFailureKind::Backend => {
+                    gettext("Refresh unavailable")
+                }
             };
         }
         match self.mailbox_mode {
-            MailboxMode::Loading => gettext("Loading mail…"),
-            MailboxMode::NoAccount => gettext("No mail account"),
-            MailboxMode::Unavailable => gettext("Mail unavailable"),
-            MailboxMode::Live => String::new(),
+            MailboxMode::Loading => {
+                gettext("Loading mail…")
+            }
+            MailboxMode::NoAccount => {
+                gettext("No mail account")
+            }
+            MailboxMode::Unavailable => {
+                gettext("Mail unavailable")
+            }
+            MailboxMode::Live => {
+                String::new()
+            }
         }
     }
 
@@ -386,15 +402,23 @@ impl MailboxViewModel {
 
     pub fn message_detail(&self) -> Option<&MessageDetail> {
         match &self.message_detail {
-            MessageDetailState::Loaded(detail) => Some(detail),
-            _ => None,
+            MessageDetailState::Loaded(detail) => {
+                Some(detail)
+            }
+            _ => {
+                None
+            }
         }
     }
 
     fn message_detail_mut(&mut self) -> Option<&mut MessageDetail> {
         match &mut self.message_detail {
-            MessageDetailState::Loaded(detail) => Some(detail),
-            _ => None,
+            MessageDetailState::Loaded(detail) => {
+                Some(detail)
+            }
+            _ => {
+                None
+            }
         }
     }
 
@@ -404,10 +428,18 @@ impl MailboxViewModel {
 
     pub(super) fn preview_content(&self) -> PreviewContent {
         match &self.message_detail {
-            MessageDetailState::Empty => PreviewContent::Empty,
-            MessageDetailState::Loading(_) => PreviewContent::Loading,
-            MessageDetailState::Loaded(detail) => PreviewContent::Loaded(detail.clone()),
-            MessageDetailState::Failed(error) => PreviewContent::Failed(error.clone()),
+            MessageDetailState::Empty => {
+                PreviewContent::Empty
+            }
+            MessageDetailState::Loading(_) => {
+                PreviewContent::Loading
+            }
+            MessageDetailState::Loaded(detail) => {
+                PreviewContent::Loaded(detail.clone())
+            }
+            MessageDetailState::Failed(error) => {
+                PreviewContent::Failed(error.clone())
+            }
         }
     }
 
@@ -753,8 +785,12 @@ impl MailboxViewModel {
         }
         self.pending_mailbox_reload = None;
         let snapshot = match result {
-            Ok(snapshot) => snapshot,
-            Err(error) => return Some(MailboxReloadOutcome::Failed(error)),
+            Ok(snapshot) => {
+                snapshot
+            }
+            Err(error) => {
+                return Some(MailboxReloadOutcome::Failed(error));
+            }
         };
 
         let previous_selection = self.selected_thread.clone();
@@ -799,16 +835,26 @@ impl MailboxViewModel {
 
     pub fn search_query(&self) -> &str {
         match &self.search {
-            SearchState::Inactive => "",
-            SearchState::Loading(request) => &request.query,
-            SearchState::Results(query) | SearchState::Failed { query, .. } => query,
+            SearchState::Inactive => {
+                ""
+            }
+            SearchState::Loading(request) => {
+                &request.query
+            }
+            SearchState::Results(query) | SearchState::Failed { query, .. } => {
+                query
+            }
         }
     }
 
     fn search_error(&self) -> Option<&str> {
         match &self.search {
-            SearchState::Failed { error, .. } => Some(error),
-            _ => None,
+            SearchState::Failed { error, .. } => {
+                Some(error)
+            }
+            _ => {
+                None
+            }
         }
     }
 
@@ -829,8 +875,12 @@ impl MailboxViewModel {
         }
 
         let offset = match &self.pagination {
-            ThreadPagination::Ready(offset) => *offset,
-            _ => return None,
+            ThreadPagination::Ready(offset) => {
+                *offset
+            }
+            _ => {
+                return None;
+            }
         };
         self.begin_thread_page_load_at(offset)
     }
@@ -866,7 +916,9 @@ impl MailboxViewModel {
         let offset = request.offset;
 
         let next_batch = match result {
-            Ok(batch) => batch,
+            Ok(batch) => {
+                batch
+            }
             Err(_) => {
                 self.pagination = if offset == 0 {
                     ThreadPagination::Exhausted
@@ -923,7 +975,10 @@ impl MailboxViewModel {
         self.begin_move_selected(FolderKind::Trash)
     }
 
-    fn begin_move_selected(&mut self, destination_kind: FolderKind) -> Option<MessageActionRequest> {
+    fn begin_move_selected(
+        &mut self,
+        destination_kind: FolderKind,
+    ) -> Option<MessageActionRequest> {
         let folder_id = self
             .folders
             .iter()
@@ -979,8 +1034,12 @@ impl MailboxViewModel {
             return None;
         }
         match result {
-            Err(error) => return Some(MessageActionOutcome::Failed(error)),
-            Ok(WriteOutcome::Unchanged) => return Some(MessageActionOutcome::Applied),
+            Err(error) => {
+                return Some(MessageActionOutcome::Failed(error));
+            }
+            Ok(WriteOutcome::Unchanged) => {
+                return Some(MessageActionOutcome::Applied);
+            }
             Ok(WriteOutcome::Applied | WriteOutcome::Queued) => {}
         }
 
@@ -1093,7 +1152,9 @@ impl MailboxViewModel {
                         ThreadPagination::Loading(request) => {
                             ThreadPagination::Ready(request.offset.saturating_sub(1))
                         }
-                        ThreadPagination::Exhausted => ThreadPagination::Exhausted,
+                        ThreadPagination::Exhausted => {
+                            ThreadPagination::Exhausted
+                        }
                     };
                 }
                 if removed && self.selected_thread.as_ref() == Some(&conversation_id) {
@@ -1167,8 +1228,12 @@ impl MailboxViewModel {
             Ok(Some(detail)) if detail.conversation_id == conversation_id => {
                 MessageDetailState::Loaded(detail)
             }
-            Ok(Some(_)) | Ok(None) => MessageDetailState::Failed(gettext("Message unavailable.")),
-            Err(error) => MessageDetailState::Failed(error),
+            Ok(Some(_)) | Ok(None) => {
+                MessageDetailState::Failed(gettext("Message unavailable."))
+            }
+            Err(error) => {
+                MessageDetailState::Failed(error)
+            }
         };
         true
     }
@@ -1267,14 +1332,20 @@ mod tests {
 
     fn pending_detail_request_id(mailbox: &MailboxViewModel) -> RequestId {
         match &mailbox.message_detail {
-            MessageDetailState::Loading(request) => request.request_id,
-            _ => panic!("detail fixture should have one pending request"),
+            MessageDetailState::Loading(request) => {
+                request.request_id
+            }
+            _ => {
+                panic!("detail fixture should have one pending request")
+            }
         }
     }
 
     fn start_search(mailbox: &mut MailboxViewModel, query: &str) -> SearchRequest {
         match mailbox.search(query) {
-            SearchTransition::Requested(request) => request,
+            SearchTransition::Requested(request) => {
+                request
+            }
             SearchTransition::Unchanged | SearchTransition::Cleared => {
                 panic!("fixture query should start a search")
             }
@@ -1283,7 +1354,9 @@ mod tests {
 
     fn begin_mailbox_reload(mailbox: &mut MailboxViewModel) -> MailboxReloadRequest {
         match mailbox.begin_cache_change(&MailAccountId("account-1".into())) {
-            Some(ViewReloadRequest::Mailbox(request)) => request,
+            Some(ViewReloadRequest::Mailbox(request)) => {
+                request
+            }
             Some(ViewReloadRequest::Search(_)) | None => {
                 panic!("folder view cache change should start a mailbox reload")
             }
@@ -2617,7 +2690,9 @@ mod tests {
                 .is_none()
         );
         let restarted = match mailbox.begin_cache_change(&MailAccountId("account-1".into())) {
-            Some(ViewReloadRequest::Search(request)) => request,
+            Some(ViewReloadRequest::Search(request)) => {
+                request
+            }
             Some(ViewReloadRequest::Mailbox(_)) | None => {
                 panic!("search view cache change should restart its query")
             }

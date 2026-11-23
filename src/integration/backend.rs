@@ -215,19 +215,29 @@ impl AccountBackend {
                 ConversationLoad::Cached(conversations) => {
                     return Ok(slice_conversations(&conversations, offset, limit));
                 }
-                ConversationLoad::Required { revision } => revision,
+                ConversationLoad::Required { revision } => {
+                    revision
+                }
             };
             let conversations = match self.load_conversation_projection(folder_id) {
-                Ok(conversations) => conversations,
-                Err(error) => match self.cached_mailbox.begin_conversation_load(folder_id) {
-                    ConversationLoad::Cached(conversations) => {
-                        return Ok(slice_conversations(&conversations, offset, limit));
+                Ok(conversations) => {
+                    conversations
+                }
+                Err(error) => {
+                    match self.cached_mailbox.begin_conversation_load(folder_id) {
+                        ConversationLoad::Cached(conversations) => {
+                            return Ok(slice_conversations(&conversations, offset, limit));
+                        }
+                        ConversationLoad::Required {
+                            revision: current_revision,
+                        } if current_revision != revision => {
+                            continue;
+                        }
+                        ConversationLoad::Required { .. } => {
+                            return Err(error);
+                        }
                     }
-                    ConversationLoad::Required {
-                        revision: current_revision,
-                    } if current_revision != revision => continue,
-                    ConversationLoad::Required { .. } => return Err(error),
-                },
+                }
             };
             match self.cached_mailbox.publish_conversations(
                 &self.binding,
@@ -377,22 +387,30 @@ impl AccountBackend {
                 change,
             )?;
             match change {
-                MessageFlagChange::Read(read) => self.action_queue.queue_read(
-                    self.binding.clone(),
-                    conversation_id.clone(),
-                    read,
-                ),
-                MessageFlagChange::Starred(starred) => self.action_queue.queue_starred(
-                    self.binding.clone(),
-                    conversation_id.clone(),
-                    starred,
-                ),
+                MessageFlagChange::Read(read) => {
+                    self.action_queue.queue_read(
+                        self.binding.clone(),
+                        conversation_id.clone(),
+                        read,
+                    );
+                }
+                MessageFlagChange::Starred(starred) => {
+                    self.action_queue.queue_starred(
+                        self.binding.clone(),
+                        conversation_id.clone(),
+                        starred,
+                    );
+                }
             }
             WriteOutcome::Queued
         };
         self.record_cached_message_change(conversation_id, |conversation| match change {
-            MessageFlagChange::Read(read) => conversation.unread_count = u32::from(!read),
-            MessageFlagChange::Starred(starred) => conversation.starred = starred,
+            MessageFlagChange::Read(read) => {
+                conversation.unread_count = u32::from(!read);
+            }
+            MessageFlagChange::Starred(starred) => {
+                conversation.starred = starred;
+            }
         });
         Ok(outcome)
     }
@@ -505,8 +523,12 @@ fn apply_message_flag(
     change: MessageFlagChange,
 ) -> anyhow::Result<()> {
     match change {
-        MessageFlagChange::Read(read) => session.set_read(conversation_id, read),
-        MessageFlagChange::Starred(starred) => session.set_starred(conversation_id, starred),
+        MessageFlagChange::Read(read) => {
+            session.set_read(conversation_id, read)
+        }
+        MessageFlagChange::Starred(starred) => {
+            session.set_starred(conversation_id, starred)
+        }
     }
 }
 

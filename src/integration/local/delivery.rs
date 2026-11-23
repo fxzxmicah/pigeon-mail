@@ -66,11 +66,21 @@ pub(super) enum DeliveryState {
 impl DeliveryState {
     pub(super) fn from_marker(marker: Option<&str>, unmarked: Self) -> anyhow::Result<Self> {
         match marker {
-            None => Ok(unmarked),
-            Some(DELIVERY_SUBMITTING) => Ok(Self::SubmissionUncertain),
-            Some(DELIVERY_PROVIDER_COPY) => Ok(Self::ProviderCopyExpected),
-            Some(DELIVERY_COPY_REQUIRED) => Ok(Self::NeedsRemoteCopy),
-            Some(marker) => Err(anyhow!("unknown local delivery state '{marker}'")),
+            None => {
+                Ok(unmarked)
+            }
+            Some(DELIVERY_SUBMITTING) => {
+                Ok(Self::SubmissionUncertain)
+            }
+            Some(DELIVERY_PROVIDER_COPY) => {
+                Ok(Self::ProviderCopyExpected)
+            }
+            Some(DELIVERY_COPY_REQUIRED) => {
+                Ok(Self::NeedsRemoteCopy)
+            }
+            Some(marker) => {
+                Err(anyhow!("unknown local delivery state '{marker}'"))
+            }
         }
     }
 

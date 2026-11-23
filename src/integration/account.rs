@@ -591,7 +591,12 @@ mod tests {
     fn standard_alias_roundtrip_preserves_explicit_and_absent_display_names() {
         let mut account = MailAccount::new(
             MailAccountId("account".into()), "Account".into(),
-            SendingIdentity::new("owner@example.com".into(), "Owner".into(), None, Default::default()),
+            SendingIdentity::new(
+                "owner@example.com".into(),
+                "Owner".into(),
+                None,
+                Default::default(),
+            ),
         );
         for (address, name) in [
             ("same@example.com", "same@example.com"),

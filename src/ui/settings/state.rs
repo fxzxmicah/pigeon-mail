@@ -223,8 +223,12 @@ impl SettingsDraftState {
                 .iter()
                 .position(|baseline| baseline.id == account.id)
             {
-                Some(index) => self.baseline[index] = account,
-                None => self.baseline.push(account),
+                Some(index) => {
+                    self.baseline[index] = account;
+                }
+                None => {
+                    self.baseline.push(account);
+                }
             }
         }
     }
@@ -244,14 +248,18 @@ impl SettingsDraftState {
         let address = identity.address.clone();
         let account = &mut self.drafts[index].account;
         let changed = match target.original_address.as_deref() {
-            Some(original) => account.update_identity(
-                original,
-                identity.display_name,
-                identity.address,
-                identity.reply_to,
-                identity.signature,
-            ),
-            None => account.add_identity(identity),
+            Some(original) => {
+                account.update_identity(
+                    original,
+                    identity.display_name,
+                    identity.address,
+                    identity.reply_to,
+                    identity.signature,
+                )
+            }
+            None => {
+                account.add_identity(identity)
+            }
         };
         if !changed {
             return false;
@@ -324,7 +332,9 @@ impl SettingsDraftState {
             .iter()
             .find(|draft| draft.account.id == editor.account_id);
         let editor_identity = match (target, editor.original_address.as_deref()) {
-            (Some(_), None) => return None,
+            (Some(_), None) => {
+                return None;
+            }
             (Some(draft), Some(address)) => {
                 let identity = draft
                     .account
@@ -333,12 +343,14 @@ impl SettingsDraftState {
                     .unwrap_or_else(|| draft.account.default_identity().clone());
                 Some((draft.account.clone(), identity))
             }
-            (None, _) => self.selected_draft().map(|draft| {
-                (
-                    draft.account.clone(),
-                    draft.account.default_identity().clone(),
-                )
-            }),
+            (None, _) => {
+                self.selected_draft().map(|draft| {
+                    (
+                        draft.account.clone(),
+                        draft.account.default_identity().clone(),
+                    )
+                })
+            }
         };
         if let Some((account, identity)) = editor_identity.as_ref() {
             self.editor = Some(AliasEditorTarget {
@@ -368,8 +380,12 @@ fn rebase_settings_drafts(
             let stored = baseline.iter().find(|stored| stored.id == account.id);
             let draft = drafts.iter().find(|draft| draft.account.id == account.id);
             match (stored, draft) {
-                (Some(stored), Some(draft)) => draft.rebase_onto(stored, account),
-                _ => SettingsAccountDraft::new(account),
+                (Some(stored), Some(draft)) => {
+                    draft.rebase_onto(stored, account)
+                }
+                _ => {
+                    SettingsAccountDraft::new(account)
+                }
             }
         })
         .collect()

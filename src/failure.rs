@@ -17,24 +17,36 @@ pub fn classify_failure(error: &anyhow::Error) -> RefreshFailureKind {
                 | gio::IOErrorEnum::ConnectionRefused
                 | gio::IOErrorEnum::ProxyFailed
                 | gio::IOErrorEnum::NotConnected
-                | gio::IOErrorEnum::BrokenPipe => RefreshFailureKind::Connectivity,
+                | gio::IOErrorEnum::BrokenPipe => {
+                    RefreshFailureKind::Connectivity
+                }
                 gio::IOErrorEnum::NoSpace
                 | gio::IOErrorEnum::ReadOnly
-                | gio::IOErrorEnum::TooManyOpenFiles => RefreshFailureKind::Storage,
-                _ => continue,
+                | gio::IOErrorEnum::TooManyOpenFiles => {
+                    RefreshFailureKind::Storage
+                }
+                _ => {
+                    continue;
+                }
             };
         }
         if let Some(kind) = error.kind::<gio::DBusError>() {
             return match kind {
-                gio::DBusError::AuthFailed => RefreshFailureKind::Authentication,
+                gio::DBusError::AuthFailed => {
+                    RefreshFailureKind::Authentication
+                }
                 gio::DBusError::NoReply
                 | gio::DBusError::IoError
                 | gio::DBusError::NoServer
                 | gio::DBusError::Timeout
                 | gio::DBusError::NoNetwork
                 | gio::DBusError::Disconnected
-                | gio::DBusError::TimedOut => RefreshFailureKind::Connectivity,
-                _ => continue,
+                | gio::DBusError::TimedOut => {
+                    RefreshFailureKind::Connectivity
+                }
+                _ => {
+                    continue;
+                }
             };
         }
     }

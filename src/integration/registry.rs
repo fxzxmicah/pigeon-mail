@@ -42,8 +42,12 @@ pub enum IdentityExtensionState {
 impl IdentityExtensionState {
     pub(crate) fn as_valid(&self) -> Option<&IdentityExtension> {
         match self {
-            Self::Valid(loaded) => Some(&loaded.extension),
-            Self::Absent | Self::Invalid => None,
+            Self::Valid(loaded) => {
+                Some(&loaded.extension)
+            }
+            Self::Absent | Self::Invalid => {
+                None
+            }
         }
     }
 
@@ -329,7 +333,9 @@ impl Monitor {
         let (started, started_receiver) = mpsc::sync_channel(0);
         let worker = std::thread::spawn(move || {
             let monitor = match RawMonitor::open(callback) {
-                Ok(monitor) => monitor,
+                Ok(monitor) => {
+                    monitor
+                }
                 Err(error) => {
                     let _ = started.send(Err(error));
                     return;
@@ -342,15 +348,19 @@ impl Monitor {
                 monitor.iterate();
                 match stop_receiver.recv_timeout(Duration::from_millis(50)) {
                     Err(RecvTimeoutError::Timeout) => {}
-                    Ok(()) | Err(RecvTimeoutError::Disconnected) => return,
+                    Ok(()) | Err(RecvTimeoutError::Disconnected) => {
+                        return;
+                    }
                 }
             }
         });
         match started_receiver.recv() {
-            Ok(Ok(())) => Ok(Self {
-                stop,
-                worker: Some(worker),
-            }),
+            Ok(Ok(())) => {
+                Ok(Self {
+                    stop,
+                    worker: Some(worker),
+                })
+            }
             Ok(Err(error)) => {
                 let _ = worker.join();
                 Err(error)
@@ -610,7 +620,9 @@ fn write_identity(
                 &signature.contents,
                 &signature.mime_type,
             ) {
-                Ok(source) => source,
+                Ok(source) => {
+                    source
+                }
                 Err(error) => {
                     for source in &staged_signatures {
                         remove_source(source.as_ptr());
@@ -909,7 +921,9 @@ fn build_snapshot(infos: &[SourceInfo]) -> Snapshot {
             {
                 Some(account.to_string())
             }
-            _ => None,
+            _ => {
+                None
+            }
         };
         let goa_name = identity_info
             .and_then(|source| {

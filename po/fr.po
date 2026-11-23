@@ -501,9 +501,6 @@ msgstr "_De"
 msgid "_Name"
 msgstr "_Nom"
 
-msgid "_Reply-To"
-msgstr "_Répondre à"
-
 msgid "_Subject"
 msgstr "_Objet"
 

@@ -1,5 +1,6 @@
 use std::ffi::CStr;
 use std::os::raw::c_char;
+use std::ptr::NonNull;
 
 pub(crate) mod account;
 pub mod backend;
@@ -11,19 +12,19 @@ pub mod settings;
 pub(crate) mod stub;
 pub mod webkit;
 
-pub(super) struct OwnedGObject<T>(*mut T);
+pub(super) struct OwnedGObject<T>(NonNull<T>);
 
 impl<T> OwnedGObject<T> {
     pub(super) unsafe fn from_ptr(pointer: *mut T) -> Option<Self> {
-        (!pointer.is_null()).then_some(Self(pointer))
+        NonNull::new(pointer).map(Self)
     }
 
     pub(super) fn as_ptr(&self) -> *mut T {
-        self.0
+        self.0.as_ptr()
     }
 
     pub(super) fn into_raw(self) -> *mut T {
-        let pointer = self.0;
+        let pointer = self.0.as_ptr();
         std::mem::forget(self);
         pointer
     }
@@ -31,23 +32,23 @@ impl<T> OwnedGObject<T> {
 
 impl<T> Drop for OwnedGObject<T> {
     fn drop(&mut self) {
-        unsafe { glib::gobject_ffi::g_object_unref(self.0 as *mut _) };
+        unsafe { glib::gobject_ffi::g_object_unref(self.0.as_ptr().cast()) };
     }
 }
 
-pub(super) struct OwnedGlibString(*mut c_char);
+pub(super) struct OwnedGlibString(NonNull<c_char>);
 
 impl OwnedGlibString {
     pub(super) unsafe fn from_ptr(pointer: *mut c_char) -> Option<Self> {
-        (!pointer.is_null()).then_some(Self(pointer))
+        NonNull::new(pointer).map(Self)
     }
 
     pub(super) fn as_ptr(&self) -> *const c_char {
-        self.0
+        self.0.as_ptr()
     }
 
     pub(super) fn to_string_lossy(&self) -> String {
-        unsafe { CStr::from_ptr(self.0) }
+        unsafe { CStr::from_ptr(self.0.as_ptr()) }
             .to_string_lossy()
             .into_owned()
     }
@@ -55,7 +56,7 @@ impl OwnedGlibString {
 
 impl Drop for OwnedGlibString {
     fn drop(&mut self) {
-        unsafe { glib::ffi::g_free(self.0 as glib::ffi::gpointer) };
+        unsafe { glib::ffi::g_free(self.0.as_ptr().cast()) };
     }
 }
 

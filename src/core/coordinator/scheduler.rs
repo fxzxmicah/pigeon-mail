@@ -96,8 +96,12 @@ where
         let mut entries = self.entries.lock().expect("latest job queue lock poisoned");
         if let Some(pending) = entries.get_mut(&key) {
             match pending {
-                Some(existing) => merge(existing, job),
-                None => *pending = Some(job),
+                Some(existing) => {
+                    merge(existing, job);
+                }
+                None => {
+                    *pending = Some(job);
+                }
             }
             return None;
         }

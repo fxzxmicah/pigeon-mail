@@ -69,10 +69,14 @@ impl MailboxCache {
     pub(super) fn begin_conversation_load(&self, folder_id: &FolderId) -> ConversationLoad {
         let cache = self.state.lock().expect("mailbox cache lock poisoned");
         match cache.conversations.get(folder_id) {
-            Some(conversations) => ConversationLoad::Cached(conversations.clone()),
-            None => ConversationLoad::Required {
-                revision: cache.local_revision,
-            },
+            Some(conversations) => {
+                ConversationLoad::Cached(conversations.clone())
+            }
+            None => {
+                ConversationLoad::Required {
+                    revision: cache.local_revision,
+                }
+            }
         }
     }
 
@@ -401,8 +405,12 @@ mod tests {
         let cache = MailboxCache::default();
         let folder_id = FolderId("drafts".into());
         let revision = match cache.begin_conversation_load(&folder_id) {
-            ConversationLoad::Required { revision } => revision,
-            ConversationLoad::Cached(_) => panic!("an empty cache must require a load"),
+            ConversationLoad::Required { revision } => {
+                revision
+            }
+            ConversationLoad::Cached(_) => {
+                panic!("an empty cache must require a load")
+            }
         };
         cache.record_message_change(&ConversationId("drafts\u{1f}new".into()), |_| {});
 

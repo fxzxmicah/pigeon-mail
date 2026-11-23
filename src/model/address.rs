@@ -31,7 +31,9 @@ pub fn split_mailbox_list(raw: &str) -> Vec<String> {
             ',' if !in_quotes && angle_depth == 0 => {
                 push_nonempty(&mut mailboxes, &mut current);
             }
-            _ => current.push(ch),
+            _ => {
+                current.push(ch);
+            }
         }
     }
     push_nonempty(&mut mailboxes, &mut current);

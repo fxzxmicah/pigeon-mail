@@ -26,7 +26,9 @@ impl MailCoordinator {
                 });
                 return;
             }
-            AttachmentLocation::CachedToken(token) => token,
+            AttachmentLocation::CachedToken(token) => {
+                token
+            }
         };
         let Some(source) = source else {
             self.publish(MailEvent::AttachmentPrepared {

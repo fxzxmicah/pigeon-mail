@@ -430,22 +430,21 @@ impl MainWindow {
         let settings_for_action = Rc::clone(&settings_dialog);
         let preferences_action = gio::SimpleAction::new("preferences", None);
         preferences_action.connect_activate(move |_, _| {
-            let existing_window = settings_for_action.borrow().clone();
-            if let Some(settings_window) = existing_window {
-                settings_window.present();
+            let existing_dialog = settings_for_action.borrow().clone();
+            if let Some(dialog) = existing_dialog {
+                dialog.present(&parent_for_preferences);
                 return;
             }
-            let settings_window = build_settings(
-                &parent_for_preferences,
+            let dialog = build_settings(
                 Rc::clone(&state_for_preferences),
                 coordinator_for_preferences.clone(),
             );
             let settings_for_close = Rc::clone(&settings_for_action);
-            settings_window.connect_close(move || {
+            dialog.connect_closed(move || {
                 settings_for_close.borrow_mut().take();
             });
-            settings_window.present();
-            *settings_for_action.borrow_mut() = Some(settings_window);
+            dialog.present(&parent_for_preferences);
+            *settings_for_action.borrow_mut() = Some(dialog);
         });
         inner.add_action(&preferences_action);
         preferences_action.set_enabled(account_dropdown.is_sensitive());
@@ -678,10 +677,12 @@ impl MainWindow {
                             .finish_thread_page_load(request_id, result);
                         if let Some(outcome) = outcome {
                             match outcome {
-                                state::ThreadPageOutcome::Initial => rebuild_thread_panel(
-                                    &state_for_refresh_events,
-                                    &thread_for_refresh_events,
-                                ),
+                                state::ThreadPageOutcome::Initial => {
+                                    rebuild_thread_panel(
+                                        &state_for_refresh_events,
+                                        &thread_for_refresh_events,
+                                    );
+                                }
                                 state::ThreadPageOutcome::Additional(added) => {
                                     for thread in &added {
                                         append_thread_row(
@@ -814,13 +815,15 @@ impl MainWindow {
                         operation,
                         display_name,
                         result,
-                    } => handle_prepared_attachment(
-                        &parent_for_events,
-                        &toast_for_events,
-                        operation,
-                        display_name,
-                        result,
-                    ),
+                    } => {
+                        handle_prepared_attachment(
+                            &parent_for_events,
+                            &toast_for_events,
+                            operation,
+                            display_name,
+                            result,
+                        );
+                    }
                 }
             }
         });
@@ -1278,11 +1281,9 @@ fn request_view_reload(coordinator: &MailCoordinator, request: state::ViewReload
         state::ViewReloadRequest::Mailbox(request) => {
             request_mailbox_reload(coordinator, request)
         }
-        state::ViewReloadRequest::Search(request) => coordinator.request_search(
-            request.request_id,
-            request.account_id,
-            request.query,
-        ),
+        state::ViewReloadRequest::Search(request) => {
+            coordinator.request_search(request.request_id, request.account_id, request.query);
+        }
     }
 }
 
@@ -1426,7 +1427,7 @@ fn build_sidebar(
     let folder_list = gtk::ListBox::builder()
         .css_classes(["navigation-sidebar", "mail-folder-list"])
         .build();
-    let loading_spinner = gtk::Spinner::new();
+    let loading_spinner = adw::Spinner::new();
     let loading_label = gtk::Label::builder()
         .xalign(0.0)
         .css_classes(["dim-label"])
@@ -1455,7 +1456,6 @@ fn build_sidebar(
         account_title,
         folder_list,
         content_stack,
-        loading_spinner,
     };
     rebuild_sidebar(state, &widgets);
 
@@ -1527,7 +1527,7 @@ fn build_thread_panel(
         .css_classes(["conversation-list"])
         .vexpand(true)
         .build();
-    let loading_spinner = gtk::Spinner::new();
+    let loading_spinner = adw::Spinner::new();
     loading_spinner.add_css_class("mailbox-loading-spinner");
     let loading_title = gtk::Label::builder()
         .label(gettext("Loading messages"))
@@ -1623,7 +1623,6 @@ fn build_thread_panel(
         heading,
         thread_list,
         content_stack,
-        loading_spinner,
         loading_title,
         loading_description,
         empty_page,
@@ -1640,7 +1639,6 @@ fn rebuild_sidebar(state: &Rc<RefCell<MailboxViewModel>>, widgets: &SidebarWidge
 
     match content {
         state::SidebarContent::Loading => {
-            widgets.loading_spinner.start();
             widgets.content_stack.set_visible_child_name("loading");
         }
         state::SidebarContent::Folders { folders, selected } => {
@@ -1680,7 +1678,6 @@ fn rebuild_sidebar(state: &Rc<RefCell<MailboxViewModel>>, widgets: &SidebarWidge
                 widgets.folder_list.select_row(Some(&row));
             }
 
-            widgets.loading_spinner.stop();
             widgets.content_stack.set_visible_child_name("folders");
         }
     }
@@ -1706,7 +1703,9 @@ fn rebuild_thread_panel(state: &Rc<RefCell<MailboxViewModel>>, widgets: &ThreadP
                 &gettext("Searching local cache…"),
             )
         }
-        state::ThreadListContent::SearchFailed(error) => widgets.show_error(error),
+        state::ThreadListContent::SearchFailed(error) => {
+            widgets.show_error(error);
+        }
         state::ThreadListContent::EmptyFolder => {
             widgets.show_empty(&gettext("No messages"), &gettext("Folder is empty."))
         }
@@ -1826,14 +1825,30 @@ fn folder_icon_name(kind: crate::model::mail::FolderKind) -> &'static str {
     use crate::model::mail::FolderKind;
 
     match kind {
-        FolderKind::Inbox => "mail-unread-symbolic",
-        FolderKind::Drafts => "document-edit-symbolic",
-        FolderKind::Outbox => "mail-send-receive-symbolic",
-        FolderKind::Sent => "mail-send-symbolic",
-        FolderKind::Archive => "folder-documents-symbolic",
-        FolderKind::Trash => "user-trash-symbolic",
-        FolderKind::Spam => "mail-mark-junk-symbolic",
-        FolderKind::Custom => "folder-symbolic",
+        FolderKind::Inbox => {
+            "mail-unread-symbolic"
+        }
+        FolderKind::Drafts => {
+            "document-edit-symbolic"
+        }
+        FolderKind::Outbox => {
+            "mail-send-receive-symbolic"
+        }
+        FolderKind::Sent => {
+            "mail-send-symbolic"
+        }
+        FolderKind::Archive => {
+            "folder-documents-symbolic"
+        }
+        FolderKind::Trash => {
+            "user-trash-symbolic"
+        }
+        FolderKind::Spam => {
+            "mail-mark-junk-symbolic"
+        }
+        FolderKind::Custom => {
+            "folder-symbolic"
+        }
     }
 }
 
@@ -1965,7 +1980,6 @@ struct SidebarWidgets {
     account_title: gtk::Label,
     folder_list: gtk::ListBox,
     content_stack: gtk::Stack,
-    loading_spinner: gtk::Spinner,
 }
 
 #[derive(Clone)]
@@ -1974,7 +1988,6 @@ struct ThreadPanelWidgets {
     heading: gtk::Label,
     thread_list: gtk::ListBox,
     content_stack: gtk::Stack,
-    loading_spinner: gtk::Spinner,
     loading_title: gtk::Label,
     loading_description: gtk::Label,
     empty_page: adw::StatusPage,
@@ -1986,24 +1999,20 @@ impl ThreadPanelWidgets {
     fn show_loading(&self, title: &str, description: &str) {
         self.loading_title.set_label(title);
         self.loading_description.set_label(description);
-        self.loading_spinner.start();
         self.content_stack.set_visible_child_name("loading");
     }
 
     fn show_messages(&self) {
-        self.loading_spinner.stop();
         self.content_stack.set_visible_child_name("messages");
     }
 
     fn show_empty(&self, title: &str, description: &str) {
-        self.loading_spinner.stop();
         self.empty_page.set_title(title);
         self.empty_page.set_description(Some(description));
         self.content_stack.set_visible_child_name("empty");
     }
 
     fn show_error(&self, description: &str) {
-        self.loading_spinner.stop();
         self.error_page.set_description(Some(description));
         self.content_stack.set_visible_child_name("error");
     }
@@ -2011,8 +2020,12 @@ impl ThreadPanelWidgets {
 
 fn preview_primary_compose_action(mailbox: &MailboxViewModel) -> ComposeKind {
     match mailbox.current_folder().map(|folder| folder.kind) {
-        Some(crate::model::mail::FolderKind::Drafts) => ComposeKind::EditDraft,
-        _ => ComposeKind::Reply,
+        Some(crate::model::mail::FolderKind::Drafts) => {
+            ComposeKind::EditDraft
+        }
+        _ => {
+            ComposeKind::Reply
+        }
     }
 }
 
@@ -2024,7 +2037,9 @@ fn handle_prepared_attachment(
     result: Result<String, String>,
 ) {
     let uri = match result {
-        Ok(uri) => uri,
+        Ok(uri) => {
+            uri
+        }
         Err(error) => {
             toast_overlay.add_toast(adw::Toast::new(&error));
             return;
@@ -2037,10 +2052,12 @@ fn handle_prepared_attachment(
             let toast_overlay = toast_overlay.clone();
             launcher.launch(Some(parent), None::<&gio::Cancellable>, move |result| {
                 let message = match result {
-                    Ok(_) => gettext_f(
-                        "Opening {attachment}",
-                        &[("attachment", &attachment_name)],
-                    ),
+                    Ok(_) => {
+                        gettext_f(
+                            "Opening {attachment}",
+                            &[("attachment", &attachment_name)],
+                        )
+                    }
                     Err(error) => {
                         crate::logging::report_failure("attachment-open", &error.into());
                         gettext_f(
@@ -2073,10 +2090,12 @@ fn handle_prepared_attachment(
                     None,
                     move |result| {
                         let message = match result {
-                            Ok(_) => gettext_f(
-                                "Saved {attachment}",
-                                &[("attachment", &attachment_name)],
-                            ),
+                            Ok(_) => {
+                                gettext_f(
+                                    "Saved {attachment}",
+                                    &[("attachment", &attachment_name)],
+                                )
+                            }
                             Err(error) => {
                                 crate::logging::report_failure("attachment-save", &error.into());
                                 gettext_f(
@@ -2141,5 +2160,4 @@ mod tests {
         ));
         assert!(!notification_belongs_to_current_account(None, &current));
     }
-
 }

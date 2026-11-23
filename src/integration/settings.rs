@@ -20,8 +20,12 @@ impl SettingsStore {
     pub fn load(&self) -> AppSettings {
         let gsettings = application_settings();
         let selected_account_id = match gsettings.string(KEY_SELECTED_ACCOUNT_ID).as_str() {
-            "" => None,
-            value => Some(MailAccountId(value.to_string())),
+            "" => {
+                None
+            }
+            value => {
+                Some(MailAccountId(value.to_string()))
+            }
         };
         AppSettings {
             selected_account_id,
