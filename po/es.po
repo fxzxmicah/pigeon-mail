@@ -288,9 +288,6 @@ msgstr "Abrir borrador"
 msgid "Opening local cache…"
 msgstr "Abriendo la caché local…"
 
-msgid "Optional Reply-To"
-msgstr "Dirección de respuesta opcional"
-
 msgid "Outbox"
 msgstr "Bandeja de salida"
 
@@ -500,6 +497,9 @@ msgstr "_De"
 
 msgid "_Name"
 msgstr "_Nombre"
+
+msgid "_Reply-To"
+msgstr "_Responder a"
 
 msgid "_Subject"
 msgstr "A_sunto"

@@ -288,9 +288,6 @@ msgstr "Entwurf öffnen"
 msgid "Opening local cache…"
 msgstr "Lokaler Cache wird geöffnet…"
 
-msgid "Optional Reply-To"
-msgstr "Optionale Antwortadresse"
-
 msgid "Outbox"
 msgstr "Postausgang"
 
@@ -500,6 +497,9 @@ msgstr "_Von"
 
 msgid "_Name"
 msgstr "_Name"
+
+msgid "_Reply-To"
+msgstr "_Antwortadresse"
 
 msgid "_Subject"
 msgstr "_Betreff"

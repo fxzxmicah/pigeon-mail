@@ -278,8 +278,14 @@ pub(super) fn build_settings(
     let alias_group = adw::PreferencesGroup::builder()
         .title(gettext("Aliases"))
         .build();
-    alias_group.add(&alias_frame);
-    alias_group.add(&alias_actions);
+    let alias_content = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .spacing(14)
+        .vexpand(true)
+        .build();
+    alias_content.append(&alias_frame);
+    alias_content.append(&alias_actions);
+    alias_group.add(&alias_content);
     main_page.append(&account_group);
     main_page.append(&alias_group);
 
@@ -293,7 +299,8 @@ pub(super) fn build_settings(
         .input_purpose(gtk::InputPurpose::Email)
         .build();
     let reply_to_row = adw::EntryRow::builder()
-        .title(gettext("Optional Reply-To"))
+        .title(gettext("_Reply-To"))
+        .use_underline(true)
         .input_purpose(gtk::InputPurpose::Email)
         .build();
     let identity_group = adw::PreferencesGroup::new();
@@ -637,34 +644,20 @@ fn rebuild_alias_list(list: &gtk::ListBox, account: Option<&MailAccount>) {
         return;
     };
     for identity in account.aliases() {
-        let row = gtk::ListBoxRow::new();
-        let line = gtk::Box::builder()
-            .spacing(10)
-            .margin_top(8)
-            .margin_bottom(8)
-            .margin_start(12)
-            .margin_end(12)
+        let row = adw::ActionRow::builder()
+            .title(identity.display_name_or_address())
             .build();
-        let title = gtk::Label::builder()
-            .xalign(0.0)
-            .hexpand(true)
-            .wrap(true)
-            .label(&format!(
-                "{} ({})",
-                identity.display_name_or_address(),
-                identity.address
-            ))
-            .build();
-        line.append(&title);
+        if !identity.display_name.is_empty() {
+            row.set_subtitle(&identity.address);
+        }
         if account.is_default_identity(&identity.address) {
             let badge = gtk::Label::builder()
                 .label(gettext("Default"))
                 .css_classes(["accent", "caption"])
                 .valign(gtk::Align::Center)
                 .build();
-            line.append(&badge);
+            row.add_suffix(&badge);
         }
-        row.set_child(Some(&line));
         list.append(&row);
     }
 }

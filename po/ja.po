@@ -288,9 +288,6 @@ msgstr "下書きを開く"
 msgid "Opening local cache…"
 msgstr "ローカルキャッシュを開いています…"
 
-msgid "Optional Reply-To"
-msgstr "任意の返信先"
-
 msgid "Outbox"
 msgstr "送信トレイ"
 
@@ -500,6 +497,9 @@ msgstr "差出人(_F)"
 
 msgid "_Name"
 msgstr "名前(_N)"
+
+msgid "_Reply-To"
+msgstr "返信先(_R)"
 
 msgid "_Subject"
 msgstr "件名(_S)"

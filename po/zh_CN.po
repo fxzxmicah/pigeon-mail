@@ -310,9 +310,6 @@ msgstr "正在打开本地缓存…"
 msgid "Opening {attachment}"
 msgstr "正在打开 {attachment}"
 
-msgid "Optional Reply-To"
-msgstr "可选回复地址"
-
 msgid "Outbox"
 msgstr "发件箱"
 
@@ -474,6 +471,9 @@ msgstr "发件人(_F)"
 
 msgid "_Name"
 msgstr "名称(_N)"
+
+msgid "_Reply-To"
+msgstr "回复地址(_R)"
 
 msgid "_Subject"
 msgstr "主题(_S)"

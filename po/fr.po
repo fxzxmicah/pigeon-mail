@@ -288,9 +288,6 @@ msgstr "Ouvrir le brouillon"
 msgid "Opening local cache…"
 msgstr "Ouverture du cache local…"
 
-msgid "Optional Reply-To"
-msgstr "Adresse de réponse facultative"
-
 msgid "Outbox"
 msgstr "Boîte d’envoi"
 
@@ -500,6 +497,9 @@ msgstr "_De"
 
 msgid "_Name"
 msgstr "_Nom"
+
+msgid "_Reply-To"
+msgstr "_Répondre à"
 
 msgid "_Subject"
 msgstr "_Objet"

@@ -1,5 +1,5 @@
 Name:           pigeon-mail
-Version:        0.2.3
+Version:        0.2.4
 Release:        1%{?dist}
 Summary:        GNOME email client using Evolution Data Server
 URL:            https://github.com/fxzxmicah/pigeon-mail
@@ -92,6 +92,10 @@ glib-compile-schemas --strict --dry-run %{buildroot}%{_datadir}/glib-2.0/schemas
 %{_datadir}/icons/hicolor/scalable/apps/org.gnome.pigeon.svg
 
 %changelog
+* Mon Nov 23 2026 Fxzx micah <48860358+fxzxmicah@users.noreply.github.com> - 0.2.4-1
+- Restore Reply-To keyboard navigation in alias settings
+- Restore spacing and native preference rows in the alias list
+
 * Mon Nov 23 2026 Fxzx micah <48860358+fxzxmicah@users.noreply.github.com> - 0.2.3-1
 - Align local mailbox storage with the current Evolution Data Server layout
 - Handle nullable native results and empty cached folder trees safely
