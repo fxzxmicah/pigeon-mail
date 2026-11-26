@@ -31,13 +31,12 @@ impl WriteTracker {
 
     #[cfg(test)]
     pub(super) fn wait(&self) {
-        let mut pending = self.count.lock().expect("write tracker lock poisoned");
-        while *pending != 0 {
-            pending = self
-                .drained
-                .wait(pending)
-                .expect("write tracker lock poisoned");
-        }
+        let pending = self.count.lock().expect("write tracker lock poisoned");
+        let (pending, _) = self
+            .drained
+            .wait_timeout_while(pending, std::time::Duration::from_secs(10), |count| *count != 0)
+            .expect("write tracker lock poisoned");
+        assert_eq!(*pending, 0, "writes did not drain");
     }
 
     pub(super) fn count(&self) -> usize {

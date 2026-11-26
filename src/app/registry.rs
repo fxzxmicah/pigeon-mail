@@ -1,5 +1,5 @@
 use std::cell::RefCell;
-use std::rc::Rc;
+use std::rc::{Rc, Weak};
 use std::time::{Duration, Instant};
 
 use futures::StreamExt;
@@ -9,6 +9,7 @@ use gtk::glib;
 
 use crate::app::accounts::{AccountRediscovery, AccountRuntime, RediscoveryInput};
 use crate::core::coordinator::MailCoordinator;
+use crate::integration::account::AccountCatalog;
 use crate::ui::mailbox::{MailboxSessionSnapshot, MailboxViewModel, MainWindow};
 
 pub(super) struct RegistryInvalidations {
@@ -16,8 +17,15 @@ pub(super) struct RegistryInvalidations {
     _monitor_guard: crate::integration::registry::Monitor,
 }
 
-#[derive(Default)]
 struct RegistryRediscovery {
+    window: Weak<MainWindow>,
+    runtime: AccountRuntime,
+    coordinator: MailCoordinator,
+    state: RefCell<RediscoveryState>,
+}
+
+#[derive(Default)]
+struct RediscoveryState {
     schedule: RediscoverySchedule,
     running: bool,
     timer: Option<glib::SourceId>,
@@ -58,135 +66,125 @@ impl RegistryInvalidations {
 }
 
 pub(super) fn watch_account_registry(
-    window: &MainWindow,
+    window: &Rc<MainWindow>,
     runtime: &AccountRuntime,
     coordinator: &MailCoordinator,
     invalidations: RegistryInvalidations,
 ) {
-    let rediscovery = Rc::new(RefCell::new(RegistryRediscovery::default()));
-    let window = window.clone();
-    let runtime = runtime.clone();
-    let coordinator = coordinator.clone();
+    let rediscovery = Rc::new(RegistryRediscovery {
+        window: Rc::downgrade(window),
+        runtime: runtime.clone(),
+        coordinator: coordinator.clone(),
+        state: RefCell::new(RediscoveryState::default()),
+    });
     glib::spawn_future_local(async move {
         let RegistryInvalidations {
             mut receiver,
             _monitor_guard,
         } = invalidations;
         while receiver.next().await.is_some() {
-            let now = Instant::now();
-            rediscovery.borrow_mut().schedule.invalidate(now);
-            schedule_registry_rediscovery(&rediscovery, &window, &runtime, &coordinator);
+            if rediscovery.window.upgrade().is_none() {
+                break;
+            }
+            rediscovery
+                .state
+                .borrow_mut()
+                .schedule
+                .invalidate(Instant::now());
+            rediscovery.schedule();
         }
     });
 }
 
-fn schedule_registry_rediscovery(
-    state: &Rc<RefCell<RegistryRediscovery>>,
-    window: &MainWindow,
-    runtime: &AccountRuntime,
-    coordinator: &MailCoordinator,
-) {
-    let due = {
-        let mut state = state.borrow_mut();
-        if let Some(timer) = state.timer.take() {
-            timer.remove();
-        }
-        state.schedule.due
-    };
-    let Some(due) = due else {
-        return;
-    };
-    let delay = due.saturating_duration_since(Instant::now());
-    let state_for_timer = Rc::clone(state);
-    let window_for_timer = window.clone();
-    let runtime_for_timer = runtime.clone();
-    let coordinator_for_timer = coordinator.clone();
-    let timer = glib::timeout_add_local_once(delay, move || {
-        begin_registry_rediscovery(
-            &state_for_timer,
-            &window_for_timer,
-            &runtime_for_timer,
-            &coordinator_for_timer,
-        );
-    });
-    state.borrow_mut().timer = Some(timer);
-}
-
-fn begin_registry_rediscovery(
-    state: &Rc<RefCell<RegistryRediscovery>>,
-    window: &MainWindow,
-    runtime: &AccountRuntime,
-    coordinator: &MailCoordinator,
-) {
-    {
-        let mut rediscovery = state.borrow_mut();
-        rediscovery.timer = None;
-        if rediscovery.running {
-            return;
-        }
-        if !rediscovery.schedule.take_due(Instant::now()) {
-            drop(rediscovery);
-            schedule_registry_rediscovery(state, window, runtime, coordinator);
-            return;
-        }
-        rediscovery.running = true;
-    }
-    let (sender, receiver) = oneshot::channel();
-    std::thread::spawn(move || {
-        let result = crate::integration::account::discover();
-        let _ = sender.send(result);
-    });
-
-    let state_for_completion = Rc::clone(state);
-    let window_for_completion = window.clone();
-    let runtime_for_completion = runtime.clone();
-    let coordinator_for_completion = coordinator.clone();
-    glib::spawn_future_local(async move {
-        let result = receiver.await;
-        let superseded = {
-            let mut rediscovery = state_for_completion.borrow_mut();
-            rediscovery.running = false;
-            rediscovery.schedule.is_pending()
+impl RegistryRediscovery {
+    fn schedule(self: &Rc<Self>) {
+        let due = {
+            let mut state = self.state.borrow_mut();
+            if let Some(timer) = state.timer.take() {
+                timer.remove();
+            }
+            state.schedule.due
         };
-        match result {
-            _ if superseded => {}
-            Ok(Ok(catalog)) => {
-                let input = rediscovery_input(window_for_completion.session_snapshot());
-                match runtime_for_completion.apply_discovered_catalog(input, catalog) {
-                    AccountRediscovery::Unchanged => {}
-                    AccountRediscovery::Catalog {
-                        accounts,
-                        changed_routes,
-                    } => {
-                        window_for_completion.update_account_catalog(accounts);
-                        coordinator_for_completion
-                            .reconnect_changed_foreground_route(&changed_routes);
+        let Some(due) = due else {
+            return;
+        };
+        let delay = due.saturating_duration_since(Instant::now());
+        let rediscovery = Rc::clone(self);
+        let timer = glib::timeout_add_local_once(delay, move || {
+            rediscovery.begin();
+        });
+        self.state.borrow_mut().timer = Some(timer);
+    }
+
+    fn begin(self: &Rc<Self>) {
+        {
+            let mut state = self.state.borrow_mut();
+            state.timer = None;
+            if state.running || self.window.upgrade().is_none() {
+                return;
+            }
+            if !state.schedule.take_due(Instant::now()) {
+                drop(state);
+                self.schedule();
+                return;
+            }
+            state.running = true;
+        }
+        let (sender, receiver) = oneshot::channel();
+        std::thread::spawn(move || {
+            let result = crate::integration::account::discover();
+            let _ = sender.send(result);
+        });
+
+        let rediscovery = Rc::clone(self);
+        glib::spawn_future_local(async move {
+            let result = receiver.await;
+            let superseded = {
+                let mut state = rediscovery.state.borrow_mut();
+                state.running = false;
+                state.schedule.is_pending()
+            };
+            let Some(window) = rediscovery.window.upgrade() else {
+                return;
+            };
+            if !superseded {
+                match result {
+                    Ok(Ok(catalog)) => {
+                        rediscovery.apply_catalog(&window, catalog);
                     }
-                    AccountRediscovery::Replacement { seed } => {
-                        window_for_completion.replace_mailbox(
-                            MailboxViewModel::from_account_catalog(
-                                seed.accounts,
-                                seed.settings,
-                                seed.mode,
-                            ),
-                        )
+                    Ok(Err(error)) => {
+                        crate::logging::report_deferred("eds-account-rediscovery", &error);
+                    }
+                    Err(_) => {
+                        tracing::error!("EDS account rediscovery worker ended without a result");
                     }
                 }
             }
-            Ok(Err(error)) => {
-                crate::logging::report_deferred("eds-account-rediscovery", &error);
+            rediscovery.schedule();
+        });
+    }
+
+    fn apply_catalog(&self, window: &MainWindow, catalog: AccountCatalog) {
+        let input = rediscovery_input(window.session_snapshot());
+        match self.runtime.apply_discovered_catalog(input, catalog) {
+            AccountRediscovery::Unchanged => {}
+            AccountRediscovery::Catalog {
+                accounts,
+                changed_routes,
+            } => {
+                window.update_account_catalog(accounts);
+                self.coordinator
+                    .reconnect_changed_foreground_route(&changed_routes);
             }
-            Err(_) => {
-                tracing::error!("EDS account rediscovery worker ended without a result");
+            AccountRediscovery::Replacement { seed } => {
+                window.replace_mailbox(MailboxViewModel::from_account_catalog(
+                    seed.accounts,
+                    seed.settings,
+                    seed.mode,
+                ));
             }
         }
-        schedule_registry_rediscovery(
-            &state_for_completion,
-            &window_for_completion,
-            &runtime_for_completion,
-            &coordinator_for_completion,
-        );
-    });
+    }
 }
 
 fn rediscovery_input(mailbox: MailboxSessionSnapshot) -> RediscoveryInput {

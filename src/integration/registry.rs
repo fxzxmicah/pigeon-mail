@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeSet, HashSet};
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::ffi::{CStr, CString};
@@ -13,6 +13,10 @@ use std::time::Duration;
 use anyhow::{Result, anyhow};
 
 use super::{OwnedGObject, OwnedGlibString, take_gerror};
+
+mod topology;
+
+use topology::build_snapshot;
 
 #[derive(Debug, Clone, Default)]
 pub struct Source {
@@ -220,20 +224,20 @@ unsafe extern "C" {
     ) -> *mut ESourceExtension;
 
     fn e_source_get_uid(source: *mut ESource) -> *const c_char;
-    fn e_source_get_display_name(source: *mut ESource) -> *const c_char;
-    fn e_source_get_parent(source: *mut ESource) -> *const c_char;
+    fn e_source_dup_display_name(source: *mut ESource) -> *mut c_char;
+    fn e_source_dup_parent(source: *mut ESource) -> *mut c_char;
     fn e_source_to_string(source: *mut ESource, length: *mut usize) -> *mut c_char;
 
-    fn e_source_goa_get_account_id(extension: *mut ESourceGoa) -> *const c_char;
-    fn e_source_goa_get_name(extension: *mut ESourceGoa) -> *const c_char;
+    fn e_source_goa_dup_account_id(extension: *mut ESourceGoa) -> *mut c_char;
+    fn e_source_goa_dup_name(extension: *mut ESourceGoa) -> *mut c_char;
     fn e_source_collection_get_mail_enabled(
         extension: *mut ESourceCollection,
     ) -> glib::ffi::gboolean;
-    fn e_source_backend_get_backend_name(extension: *mut ESourceBackend) -> *const c_char;
-    fn e_source_mail_account_get_identity_uid(extension: *mut ESourceMailAccount) -> *const c_char;
-    fn e_source_mail_submission_get_transport_uid(
+    fn e_source_backend_dup_backend_name(extension: *mut ESourceBackend) -> *mut c_char;
+    fn e_source_mail_account_dup_identity_uid(extension: *mut ESourceMailAccount) -> *mut c_char;
+    fn e_source_mail_submission_dup_transport_uid(
         extension: *mut ESourceMailSubmission,
-    ) -> *const c_char;
+    ) -> *mut c_char;
     fn e_source_mail_submission_dup_sent_folder(
         extension: *mut ESourceMailSubmission,
     ) -> *mut c_char;
@@ -255,10 +259,10 @@ unsafe extern "C" {
         extension: *mut ESourceMailComposition,
         drafts_folder: *const c_char,
     );
-    fn e_source_mail_identity_get_name(extension: *mut ESourceMailIdentity) -> *const c_char;
-    fn e_source_mail_identity_get_address(extension: *mut ESourceMailIdentity) -> *const c_char;
-    fn e_source_mail_identity_get_reply_to(extension: *mut ESourceMailIdentity) -> *const c_char;
-    fn e_source_mail_identity_get_aliases(extension: *mut ESourceMailIdentity) -> *const c_char;
+    fn e_source_mail_identity_dup_name(extension: *mut ESourceMailIdentity) -> *mut c_char;
+    fn e_source_mail_identity_dup_address(extension: *mut ESourceMailIdentity) -> *mut c_char;
+    fn e_source_mail_identity_dup_reply_to(extension: *mut ESourceMailIdentity) -> *mut c_char;
+    fn e_source_mail_identity_dup_aliases(extension: *mut ESourceMailIdentity) -> *mut c_char;
     fn e_source_mail_identity_dup_signature_uid(
         extension: *mut ESourceMailIdentity,
     ) -> *mut c_char;
@@ -296,7 +300,7 @@ unsafe extern "C" {
         cancellable: *mut gio::ffi::GCancellable,
         error: *mut *mut glib::ffi::GError,
     ) -> glib::ffi::gboolean;
-    fn e_source_authentication_get_method(extension: *mut ESourceAuthentication) -> *const c_char;
+    fn e_source_authentication_dup_method(extension: *mut ESourceAuthentication) -> *mut c_char;
 
     fn mail_bridge_eds_registry_watch_new(
         callback: Option<unsafe extern "C" fn(*mut c_void)>,
@@ -831,7 +835,7 @@ unsafe fn load_source_info(
 
     Ok(SourceInfo {
         uid,
-        parent: unsafe { cstr_to_string(e_source_get_parent(source)) },
+        parent: unsafe { take_owned_c_string(e_source_dup_parent(source)) },
         enabled: unsafe { e_source_registry_check_enabled(registry, source) != 0 },
         direct_goa_account_id: unsafe { source_goa_account_id(source) },
         direct_goa_name: unsafe { source_goa_name(source) },
@@ -856,133 +860,6 @@ unsafe fn load_source_info(
                 || has_extension(source, EXTENSION_MAIL_SUBMISSION)
         },
     })
-}
-
-fn build_snapshot(infos: &[SourceInfo]) -> Snapshot {
-    let info_by_uid = infos
-        .iter()
-        .map(|info| (info.uid.clone(), info))
-        .collect::<BTreeMap<_, _>>();
-
-    let mut entries_by_uid = BTreeMap::new();
-
-    for info in infos {
-        if !info.is_account && !info.is_identity && !info.is_transport {
-            continue;
-        }
-        let resolved_backend_name = if info.is_account {
-            info.direct_mail_account_backend_name.clone()
-        } else if info.is_transport {
-            info.direct_mail_transport_backend_name.clone()
-        } else {
-            None
-        };
-
-        let entry = Source {
-            uid: info.uid.clone(),
-            parent: info.parent.clone(),
-            enabled: info.enabled,
-            identity_name: info.direct_name.clone(),
-            identity_address: info.direct_address.clone(),
-            identity_reply_to: info.direct_reply_to.clone(),
-            identity_aliases: info.direct_aliases.clone(),
-            identity_signature: info.direct_signature.clone(),
-            identity_extension: info.direct_identity_extension.clone(),
-            backend_name: resolved_backend_name,
-            auth_method: info.direct_auth_method.clone(),
-            mailbox_configuration_hash: info.mailbox_configuration_hash,
-            configuration_hash: source_configuration_hash(info, &info_by_uid),
-        };
-
-        entries_by_uid.insert(info.uid.clone(), entry);
-    }
-
-    let mut triplets = Vec::new();
-    for info in infos.iter().filter(|info| info.is_account) {
-        let identity_uid = info.direct_identity_uid.as_ref();
-        let identity_info = identity_uid.and_then(|uid| info_by_uid.get(uid).copied());
-        let transport_uid = identity_info.and_then(|info| info.direct_transport_uid.as_ref());
-        let transport_info = transport_uid.and_then(|uid| info_by_uid.get(uid).copied());
-        let source_goa_id = |source: &SourceInfo| {
-            inherited_source_value(source, &info_by_uid, |entry| {
-                entry.direct_goa_account_id.as_ref()
-            })
-        };
-        let account_goa_id = source_goa_id(info);
-        let identity_goa_id = identity_info.and_then(|source| source_goa_id(source));
-        let transport_goa_id = transport_info.and_then(|source| source_goa_id(source));
-        let goa_account_id = match (
-            account_goa_id.as_deref(),
-            identity_goa_id.as_deref(),
-            transport_goa_id.as_deref(),
-        ) {
-            (Some(account), Some(identity), Some(transport))
-                if account == identity && account == transport =>
-            {
-                Some(account.to_string())
-            }
-            _ => {
-                None
-            }
-        };
-        let goa_name = identity_info
-            .and_then(|source| {
-                inherited_source_value(source, &info_by_uid, |entry| entry.direct_goa_name.as_ref())
-            })
-            .or_else(|| {
-                inherited_source_value(info, &info_by_uid, |entry| entry.direct_goa_name.as_ref())
-            })
-            .or_else(|| {
-                transport_info.and_then(|source| {
-                    inherited_source_value(source, &info_by_uid, |entry| {
-                        entry.direct_goa_name.as_ref()
-                    })
-                })
-            });
-        triplets.push(MailTriplet {
-            account: entries_by_uid
-                .get(&info.uid)
-                .expect("account source must exist in its own registry snapshot")
-                .clone(),
-            identity: identity_uid
-                .and_then(|uid| entries_by_uid.get(uid))
-                .cloned(),
-            transport: transport_uid
-                .and_then(|uid| entries_by_uid.get(uid))
-                .cloned(),
-            goa_account_id,
-            goa_name,
-            mail_enabled: inherited_source_value(info, &info_by_uid, |entry| {
-                entry.direct_collection_mail_enabled.as_ref()
-            }),
-        });
-    }
-
-    Snapshot { triplets }
-}
-
-fn inherited_source_value<T: Clone>(
-    info: &SourceInfo,
-    infos: &BTreeMap<String, &SourceInfo>,
-    value: impl for<'a> Fn(&'a SourceInfo) -> Option<&'a T>,
-) -> Option<T> {
-    if let Some(value) = value(info) {
-        return Some(value.clone());
-    }
-
-    let mut visited = BTreeSet::new();
-    let mut current_parent = info.parent.clone();
-    while let Some(parent_uid) = current_parent {
-        if !visited.insert(parent_uid.clone()) {
-            return None;
-        }
-        let parent = infos.get(&parent_uid)?;
-        if let Some(value) = value(parent) {
-            return Some(value.clone());
-        }
-        current_parent = parent.parent.clone();
-    }
-    None
 }
 
 unsafe fn has_extension(source: *mut ESource, extension_name: &CStr) -> bool {
@@ -1010,12 +887,12 @@ unsafe fn existing_extension(
 
 unsafe fn source_goa_account_id(source: *mut ESource) -> Option<String> {
     let extension = unsafe { existing_extension(source, EXTENSION_GOA)? };
-    cstr_to_string(unsafe { e_source_goa_get_account_id(extension as *mut ESourceGoa) })
+    take_owned_c_string(unsafe { e_source_goa_dup_account_id(extension as *mut ESourceGoa) })
 }
 
 unsafe fn source_goa_name(source: *mut ESource) -> Option<String> {
     let extension = unsafe { existing_extension(source, EXTENSION_GOA)? };
-    cstr_to_string(unsafe { e_source_goa_get_name(extension as *mut ESourceGoa) })
+    take_owned_c_string(unsafe { e_source_goa_dup_name(extension as *mut ESourceGoa) })
 }
 
 unsafe fn source_collection_mail_enabled(source: *mut ESource) -> Option<bool> {
@@ -1025,25 +902,29 @@ unsafe fn source_collection_mail_enabled(source: *mut ESource) -> Option<bool> {
 
 unsafe fn source_mail_account_backend_name(source: *mut ESource) -> Option<String> {
     let extension = unsafe { existing_extension(source, EXTENSION_MAIL_ACCOUNT)? };
-    cstr_to_string(unsafe { e_source_backend_get_backend_name(extension as *mut ESourceBackend) })
+    take_owned_c_string(unsafe {
+        e_source_backend_dup_backend_name(extension as *mut ESourceBackend)
+    })
 }
 
 unsafe fn source_mail_transport_backend_name(source: *mut ESource) -> Option<String> {
     let extension = unsafe { existing_extension(source, EXTENSION_MAIL_TRANSPORT)? };
-    cstr_to_string(unsafe { e_source_backend_get_backend_name(extension as *mut ESourceBackend) })
+    take_owned_c_string(unsafe {
+        e_source_backend_dup_backend_name(extension as *mut ESourceBackend)
+    })
 }
 
 unsafe fn source_mail_account_identity_uid(source: *mut ESource) -> Option<String> {
     let extension = unsafe { existing_extension(source, EXTENSION_MAIL_ACCOUNT)? };
-    cstr_to_string(unsafe {
-        e_source_mail_account_get_identity_uid(extension as *mut ESourceMailAccount)
+    take_owned_c_string(unsafe {
+        e_source_mail_account_dup_identity_uid(extension as *mut ESourceMailAccount)
     })
 }
 
 unsafe fn source_mail_submission_transport_uid(source: *mut ESource) -> Option<String> {
     let extension = unsafe { existing_extension(source, EXTENSION_MAIL_SUBMISSION)? };
-    cstr_to_string(unsafe {
-        e_source_mail_submission_get_transport_uid(extension as *mut ESourceMailSubmission)
+    take_owned_c_string(unsafe {
+        e_source_mail_submission_dup_transport_uid(extension as *mut ESourceMailSubmission)
     })
 }
 
@@ -1087,52 +968,31 @@ unsafe fn source_configuration(source: *mut ESource) -> String {
     .into_owned()
 }
 
-fn source_configuration_hash(
-    source: &SourceInfo,
-    sources: &BTreeMap<String, &SourceInfo>,
-) -> u64 {
-    let mut hasher = DefaultHasher::new();
-    let mut current = Some(source);
-    let mut visited = BTreeSet::new();
-    while let Some(entry) = current {
-        if !visited.insert(entry.uid.as_str()) {
-            break;
-        }
-        entry.uid.hash(&mut hasher);
-        entry.serialized_configuration.hash(&mut hasher);
-        current = entry
-            .parent
-            .as_deref()
-            .and_then(|parent| sources.get(parent).copied());
-    }
-    hasher.finish()
-}
-
 unsafe fn source_mail_identity_name(source: *mut ESource) -> Option<String> {
     let extension = unsafe { existing_extension(source, EXTENSION_MAIL_IDENTITY)? };
-    cstr_to_string(unsafe {
-        e_source_mail_identity_get_name(extension as *mut ESourceMailIdentity)
+    take_owned_c_string(unsafe {
+        e_source_mail_identity_dup_name(extension as *mut ESourceMailIdentity)
     })
 }
 
 unsafe fn source_mail_identity_address(source: *mut ESource) -> Option<String> {
     let extension = unsafe { existing_extension(source, EXTENSION_MAIL_IDENTITY)? };
-    cstr_to_string(unsafe {
-        e_source_mail_identity_get_address(extension as *mut ESourceMailIdentity)
+    take_owned_c_string(unsafe {
+        e_source_mail_identity_dup_address(extension as *mut ESourceMailIdentity)
     })
 }
 
 unsafe fn source_mail_identity_reply_to(source: *mut ESource) -> Option<String> {
     let extension = unsafe { existing_extension(source, EXTENSION_MAIL_IDENTITY)? };
-    cstr_to_string(unsafe {
-        e_source_mail_identity_get_reply_to(extension as *mut ESourceMailIdentity)
+    take_owned_c_string(unsafe {
+        e_source_mail_identity_dup_reply_to(extension as *mut ESourceMailIdentity)
     })
 }
 
 unsafe fn source_mail_identity_aliases(source: *mut ESource) -> Option<String> {
     let extension = unsafe { existing_extension(source, EXTENSION_MAIL_IDENTITY)? };
-    cstr_to_string(unsafe {
-        e_source_mail_identity_get_aliases(extension as *mut ESourceMailIdentity)
+    take_owned_c_string(unsafe {
+        e_source_mail_identity_dup_aliases(extension as *mut ESourceMailIdentity)
     })
 }
 
@@ -1277,7 +1137,7 @@ unsafe fn load_signature_source(
     .into_owned();
     Some(SignatureMetadata {
         uid,
-        display_name: cstr_to_string(unsafe { e_source_get_display_name(source.as_ptr()) })
+        display_name: take_owned_c_string(unsafe { e_source_dup_display_name(source.as_ptr()) })
             .unwrap_or_default(),
         contents: text,
         mime_type,
@@ -1295,8 +1155,8 @@ fn empty_signature_metadata(uid: String) -> SignatureMetadata {
 
 unsafe fn source_authentication_method(source: *mut ESource) -> Option<String> {
     let extension = unsafe { existing_extension(source, EXTENSION_AUTHENTICATION)? };
-    cstr_to_string(unsafe {
-        e_source_authentication_get_method(extension as *mut ESourceAuthentication)
+    take_owned_c_string(unsafe {
+        e_source_authentication_dup_method(extension as *mut ESourceAuthentication)
     })
 }
 
@@ -1331,135 +1191,4 @@ fn take_owned_c_string_vector(value: *mut *mut c_char) -> Vec<String> {
         glib::ffi::g_free(value as glib::ffi::gpointer);
     }
     strings
-}
-
-#[cfg(test)]
-mod tests {
-    use std::collections::BTreeMap;
-
-    use super::{
-        IdentityExtensionState, SourceInfo, build_snapshot, inherited_source_value,
-        source_configuration_hash,
-    };
-
-    fn source(uid: &str, parent: Option<&str>) -> SourceInfo {
-        SourceInfo {
-            uid: uid.into(),
-            parent: parent.map(str::to_string),
-            enabled: true,
-            direct_goa_account_id: None,
-            direct_goa_name: None,
-            direct_collection_mail_enabled: None,
-            direct_mail_account_backend_name: None,
-            direct_mail_transport_backend_name: None,
-            direct_identity_uid: None,
-            direct_transport_uid: None,
-            direct_name: None,
-            direct_address: None,
-            direct_reply_to: None,
-            direct_aliases: None,
-            direct_signature: None,
-            direct_identity_extension: IdentityExtensionState::Absent,
-            direct_auth_method: None,
-            mailbox_configuration_hash: 0,
-            serialized_configuration: String::new(),
-            is_account: false,
-            is_identity: false,
-            is_transport: false,
-        }
-    }
-
-    #[test]
-    fn snapshot_inherits_goa_metadata_across_a_complete_mail_triplet() {
-        let mut collection = source("collection", None);
-        collection.direct_goa_account_id = Some("account-example".into());
-        collection.direct_goa_name = Some("Example Account".into());
-        collection.direct_collection_mail_enabled = Some(true);
-
-        let mut account = source("account", Some("collection"));
-        account.is_account = true;
-        account.direct_mail_account_backend_name = Some("imapx".into());
-        account.direct_identity_uid = Some("identity".into());
-        let mut identity = source("identity", Some("collection"));
-        identity.is_identity = true;
-        identity.direct_transport_uid = Some("transport".into());
-        identity.direct_address = Some("identity@example.invalid".into());
-        let mut transport = source("transport", Some("collection"));
-        transport.is_transport = true;
-        transport.direct_mail_transport_backend_name = Some("smtp".into());
-
-        let snapshot = build_snapshot(&[collection, account, identity, transport]);
-
-        assert_eq!(snapshot.triplets.len(), 1);
-        let triplet = &snapshot.triplets[0];
-        assert_eq!(triplet.goa_account_id.as_deref(), Some("account-example"));
-        assert_eq!(triplet.goa_name.as_deref(), Some("Example Account"));
-        assert_eq!(triplet.mail_enabled, Some(true));
-        assert_eq!(
-            triplet
-                .identity
-                .as_ref()
-                .unwrap()
-                .identity_address
-                .as_deref(),
-            Some("identity@example.invalid")
-        );
-    }
-
-    #[test]
-    fn triplet_rejects_conflicting_inherited_goa_ownership() {
-        let mut collection = source("collection", None);
-        collection.direct_goa_account_id = Some("account-one".into());
-
-        let mut account = source("account", Some("collection"));
-        account.is_account = true;
-        account.direct_identity_uid = Some("identity".into());
-        let mut identity = source("identity", Some("collection"));
-        identity.is_identity = true;
-        identity.direct_goa_account_id = Some("account-two".into());
-        identity.direct_transport_uid = Some("transport".into());
-        let mut transport = source("transport", Some("collection"));
-        transport.is_transport = true;
-
-        let snapshot = build_snapshot(&[collection, account, identity, transport]);
-
-        assert_eq!(snapshot.triplets.len(), 1);
-        assert_eq!(snapshot.triplets[0].goa_account_id, None);
-    }
-
-    #[test]
-    fn inherited_values_stop_at_a_parent_cycle() {
-        let first = source("first", Some("second"));
-        let second = source("second", Some("first"));
-        let sources = [&first, &second]
-            .into_iter()
-            .map(|source| (source.uid.clone(), source))
-            .collect::<BTreeMap<_, _>>();
-
-        let inherited = inherited_source_value(&first, &sources, |source| {
-            source.direct_goa_account_id.as_ref()
-        });
-
-        assert_eq!(inherited, None);
-    }
-
-    #[test]
-    fn source_configuration_hash_includes_ancestor_settings() {
-        let mut collection = source("collection", None);
-        collection.serialized_configuration = "[Collection]\nBackendName=first".into();
-        let account = source("account", Some("collection"));
-        let first_sources = [&collection, &account]
-            .into_iter()
-            .map(|source| (source.uid.clone(), source))
-            .collect();
-        let first = source_configuration_hash(&account, &first_sources);
-
-        collection.serialized_configuration = "[Collection]\nBackendName=second".into();
-        let second_sources = [&collection, &account]
-            .into_iter()
-            .map(|source| (source.uid.clone(), source))
-            .collect();
-
-        assert_ne!(first, source_configuration_hash(&account, &second_sources));
-    }
 }

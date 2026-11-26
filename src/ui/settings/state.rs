@@ -1,4 +1,14 @@
-use crate::model::account::{MailAccount, MailAccountId, SendingIdentity};
+use crate::model::account::{
+    AccountIdentityEdit, MailAccount, MailAccountId, SendingIdentity, Signature,
+};
+
+fn rebase_field<T: Clone + PartialEq>(baseline: &T, local: &T, incoming: &T) -> T {
+    if local == baseline {
+        incoming.clone()
+    } else {
+        local.clone()
+    }
+}
 
 #[derive(Clone)]
 struct SettingsAccountDraft {
@@ -42,16 +52,31 @@ impl SettingsAccountDraft {
 
         for identity in self.account.aliases() {
             match baseline.identity(&identity.address) {
-                Some(old)
-                    if old != identity
-                        && rebased.account.identity(&identity.address).is_some() =>
-                {
+                Some(old) if old != identity => {
+                    let Some(incoming) = rebased.account.identity(&identity.address) else {
+                        continue;
+                    };
                     rebased.account.update_identity(
                         &identity.address,
-                        identity.display_name.clone(),
+                        rebase_field(
+                            &old.display_name,
+                            &identity.display_name,
+                            &incoming.display_name,
+                        ),
                         identity.address.clone(),
-                        identity.reply_to.clone(),
-                        identity.signature.clone(),
+                        rebase_field(&old.reply_to, &identity.reply_to, &incoming.reply_to),
+                        Signature {
+                            html: rebase_field(
+                                &old.signature.html,
+                                &identity.signature.html,
+                                &incoming.signature.html,
+                            ),
+                            text: rebase_field(
+                                &old.signature.text,
+                                &identity.signature.text,
+                                &incoming.signature.text,
+                            ),
+                        },
                     );
                 }
                 None => {
@@ -201,35 +226,40 @@ impl SettingsDraftState {
         self.editor = None;
     }
 
-    pub(super) fn accounts_to_save(&self) -> Option<Vec<MailAccount>> {
-        self.drafts
-            .iter()
-            .map(SettingsAccountDraft::finish)
-            .collect()
+    pub(super) fn edits_to_save(&self) -> Option<Vec<AccountIdentityEdit>> {
+        let mut edits = Vec::new();
+        debug_assert_eq!(self.drafts.len(), self.baseline.len());
+        for (draft, baseline) in self.drafts.iter().zip(&self.baseline) {
+            debug_assert_eq!(draft.account.id, baseline.id);
+            let desired = draft.finish()?;
+            if desired != *baseline {
+                edits.push(AccountIdentityEdit {
+                    baseline: baseline.clone(),
+                    desired,
+                });
+            }
+        }
+        Some(edits)
     }
 
-    pub(super) fn record_saved(&mut self, accounts: Vec<MailAccount>) {
-        for account in accounts {
+    pub(super) fn record_saved(&mut self, edits: Vec<AccountIdentityEdit>) {
+        for AccountIdentityEdit { baseline, desired } in edits {
+            let Some(current) = self.baseline.iter_mut().find(|current| current.id == desired.id)
+            else {
+                continue;
+            };
+            if *current != baseline && *current != desired {
+                continue;
+            }
             if let Some(draft) = self
                 .drafts
                 .iter_mut()
-                .find(|draft| draft.account.id == account.id)
-                && draft.finish().as_ref() == Some(&account)
+                .find(|draft| draft.account.id == desired.id)
+                && draft.finish().as_ref() == Some(&desired)
             {
-                *draft = SettingsAccountDraft::new(account.clone());
+                *draft = SettingsAccountDraft::new(desired.clone());
             }
-            match self
-                .baseline
-                .iter()
-                .position(|baseline| baseline.id == account.id)
-            {
-                Some(index) => {
-                    self.baseline[index] = account;
-                }
-                None => {
-                    self.baseline.push(account);
-                }
-            }
+            *current = desired;
         }
     }
 
@@ -467,10 +497,49 @@ mod tests {
     }
 
     #[test]
+    fn saving_after_a_catalog_reorder_uses_the_edited_account_and_latest_baseline() {
+        let first = account();
+        let mut second = account();
+        second.id = MailAccountId("second".into());
+        let mut state = SettingsDraftState::new(vec![first.clone(), second.clone()], 0);
+        assert!(state.edits_to_save().unwrap().is_empty());
+
+        assert!(state.select_account(1));
+        state.select_identity(Some(1));
+        let (_, mut alias) = state.begin_edit().unwrap();
+        let target = state.editor_target().unwrap();
+        alias.display_name = "Edited alias".into();
+        assert!(state.apply_editor(&target, alias));
+        state.finish_editor();
+        state.rename_selected("Edited account".into()).unwrap();
+
+        assert!(second.update_identity(
+            "alias@example.com",
+            "Alias".into(),
+            "alias@example.com".into(),
+            Some("reply@example.net".into()),
+            Default::default(),
+        ));
+        state.rebase(vec![second.clone(), first.clone()]);
+        assert!(state.select_account(1));
+        assert_eq!(state.view_snapshot().account.unwrap(), first);
+
+        let edits = state.edits_to_save().unwrap();
+        assert_eq!(edits.len(), 1);
+        assert_eq!(edits[0].baseline, second);
+        let desired = &edits[0].desired;
+        assert_eq!(desired.id, second.id);
+        assert_eq!(desired.display_name, "Edited account");
+        let alias = desired.identity("alias@example.com").unwrap();
+        assert_eq!(alias.display_name, "Edited alias");
+        assert_eq!(alias.reply_to.as_deref(), Some("reply@example.net"));
+    }
+
+    #[test]
     fn edits_after_a_successful_save_rebase_against_the_submitted_snapshot() {
         let mut state = SettingsDraftState::new(vec![account()], 0);
         state.rename_selected("  Saved name  ".into()).unwrap();
-        let submitted = state.accounts_to_save().unwrap();
+        let submitted = state.edits_to_save().unwrap();
         state.record_saved(submitted.clone());
 
         assert_eq!(
@@ -479,7 +548,7 @@ mod tests {
         );
 
         state.rename_selected("New edit".into()).unwrap();
-        state.rebase(submitted);
+        state.rebase(submitted.into_iter().map(|edit| edit.desired).collect());
 
         assert_eq!(
             state.view_snapshot().account_names,

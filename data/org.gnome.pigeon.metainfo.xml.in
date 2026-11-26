@@ -33,6 +33,15 @@
   </categories>
   <content_rating type="oars-1.1"/>
   <releases its:translate="no">
+    <release version="0.2.5" date="2026-11-26">
+      <description>
+        <ul>
+          <li>Show successful delivery in local Sent even when the incoming mail server is unavailable.</li>
+          <li>Improve draft synchronization and keep remaining attachments available after saving a draft.</li>
+          <li>Preserve unsaved account settings across account updates and keep message selection responsive during downloads.</li>
+        </ul>
+      </description>
+    </release>
     <release version="0.2.4" date="2026-11-23">
       <description>
         <p>Restore Reply-To keyboard navigation and refine the alias settings layout with native preference rows.</p>

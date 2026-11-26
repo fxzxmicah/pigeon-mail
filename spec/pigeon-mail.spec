@@ -1,5 +1,5 @@
 Name:           pigeon-mail
-Version:        0.2.4
+Version:        0.2.5
 Release:        1%{?dist}
 Summary:        GNOME email client using Evolution Data Server
 URL:            https://github.com/fxzxmicah/pigeon-mail
@@ -92,6 +92,11 @@ glib-compile-schemas --strict --dry-run %{buildroot}%{_datadir}/glib-2.0/schemas
 %{_datadir}/icons/hicolor/scalable/apps/org.gnome.pigeon.svg
 
 %changelog
+* Thu Nov 26 2026 Fxzx micah <48860358+fxzxmicah@users.noreply.github.com> - 0.2.5-1
+- Show successful delivery in local Sent even when the incoming mail server is unavailable
+- Improve draft synchronization and keep remaining attachments available after saving a draft
+- Preserve unsaved account settings across account updates and keep message selection responsive during downloads
+
 * Mon Nov 23 2026 Fxzx micah <48860358+fxzxmicah@users.noreply.github.com> - 0.2.4-1
 - Restore Reply-To keyboard navigation in alias settings
 - Restore spacing and native preference rows in the alias list

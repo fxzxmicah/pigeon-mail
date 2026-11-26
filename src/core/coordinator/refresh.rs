@@ -394,7 +394,13 @@ impl MailCoordinator {
         };
 
         let unresolved_before = service.unresolved_message_action_count();
-        let result = service.refresh();
+        let result = service.refresh(&|| {
+            if self.is_foreground_route(&service) {
+                self.publish(MailEvent::MailboxCacheChanged {
+                    account_id: service.account_id().clone(),
+                });
+            }
+        });
         let unresolved_after = service.unresolved_message_action_count();
         if unresolved_before != unresolved_after {
             self.publish(MailEvent::PendingWorkChanged);

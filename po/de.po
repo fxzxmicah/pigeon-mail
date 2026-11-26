@@ -60,6 +60,9 @@ msgstr "Anhang ist nicht verfügbar."
 msgid "Attachments"
 msgstr "Anhänge"
 
+msgid "Attachments not added."
+msgstr "Anhänge wurden nicht hinzugefügt."
+
 msgid "Authentication failed"
 msgstr "Authentifizierung fehlgeschlagen"
 

@@ -1,8 +1,10 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::num::NonZeroU64;
 use std::sync::{Arc, Mutex};
 
 use anyhow::anyhow;
 use crate::integration::account::EdsAccountBinding;
+use crate::integration::camel::AccountSession;
 use crate::integration::local::{LocalFolder, LocalMailbox};
 use crate::model::account::MailAccountId;
 use crate::model::mail::{
@@ -75,7 +77,7 @@ pub(crate) trait MailBackend: Send + Sync + 'static {
         limit: usize,
     ) -> anyhow::Result<Vec<ConversationSummary>>;
 
-    fn fill_message_cache(&self, conversation_id: &ConversationId) -> anyhow::Result<bool>;
+    fn fill_message_cache(&self, conversation_id: &ConversationId) -> anyhow::Result<()>;
 
     fn get_cached_message_detail(
         &self,
@@ -90,7 +92,7 @@ pub(crate) trait MailBackend: Send + Sync + 'static {
 
     fn search(&self, query: &str) -> anyhow::Result<Vec<ConversationSummary>>;
 
-    fn refresh(&self) -> anyhow::Result<RefreshOutcome>;
+    fn refresh(&self, cache_changed: &dyn Fn()) -> anyhow::Result<RefreshOutcome>;
 
     fn set_starred(
         &self,
@@ -211,9 +213,12 @@ impl AccountBackend {
         limit: usize,
     ) -> anyhow::Result<Vec<ConversationSummary>> {
         loop {
-            let revision = match self.cached_mailbox.begin_conversation_load(folder_id) {
+            let revision = match self
+                .cached_mailbox
+                .begin_conversation_load(folder_id, offset, limit)
+            {
                 ConversationLoad::Cached(conversations) => {
-                    return Ok(slice_conversations(&conversations, offset, limit));
+                    return Ok(conversations);
                 }
                 ConversationLoad::Required { revision } => {
                     revision
@@ -224,9 +229,12 @@ impl AccountBackend {
                     conversations
                 }
                 Err(error) => {
-                    match self.cached_mailbox.begin_conversation_load(folder_id) {
+                    match self
+                        .cached_mailbox
+                        .begin_conversation_load(folder_id, offset, limit)
+                    {
                         ConversationLoad::Cached(conversations) => {
-                            return Ok(slice_conversations(&conversations, offset, limit));
+                            return Ok(conversations);
                         }
                         ConversationLoad::Required {
                             revision: current_revision,
@@ -245,9 +253,10 @@ impl AccountBackend {
                 revision,
                 conversations,
                 &self.action_queue,
+                (offset, limit),
             ) {
                 ConversationPublication::Published(conversations) => {
-                    return Ok(slice_conversations(&conversations, offset, limit));
+                    return Ok(conversations);
                 }
                 ConversationPublication::Stale => {}
             }
@@ -261,16 +270,24 @@ impl AccountBackend {
         let folders = self.folders()?;
         let local_mailbox = LocalMailbox::new(&self.binding);
         let local_projection = local_mailbox.folder_for_projection(&folders, folder_id);
-        let session = self.session()?;
+        self.load_folder_rows(&local_mailbox, folder_id, local_projection)
+    }
+
+    fn load_folder_rows(
+        &self,
+        local_mailbox: &LocalMailbox<'_>,
+        folder_id: &FolderId,
+        local_projection: Option<LocalFolder>,
+    ) -> anyhow::Result<Vec<ConversationSummary>> {
         let mut conversations = if local_projection
             .is_some_and(|folder| local_mailbox.folder_id(folder) == *folder_id)
         {
             Vec::new()
         } else {
-            session
+            self.session()?
                 .lock()
                 .expect("camel account session lock poisoned")
-                .list_conversations(folder_id, 0, 0)?
+                .list_conversations(folder_id)?
         };
         if let Some(folder) = local_projection {
             local_mailbox.merge_cached_role(folder, folder_id, &mut conversations)?;
@@ -282,10 +299,36 @@ impl AccountBackend {
         &self,
         mailbox: &LocalMailbox<'_>,
         folders: &[LocalFolder],
-    ) {
-        for folder_id in self.cached_mailbox.invalidate_local(mailbox, folders) {
-            if let Err(error) = self.conversations(&folder_id, 0, 0) {
-                crate::logging::report_deferred("local-cache-projection", &error);
+    ) -> anyhow::Result<()> {
+        self.refresh_local_projection_with(mailbox, folders, |id, role| {
+            self.load_folder_rows(mailbox, id, Some(role))
+        })
+    }
+
+    fn refresh_local_projection_with(
+        &self,
+        mailbox: &LocalMailbox<'_>,
+        folders: &[LocalFolder],
+        read_rows: impl Fn(&FolderId, LocalFolder) -> anyhow::Result<Vec<ConversationSummary>>,
+    ) -> anyhow::Result<()> {
+        loop {
+            let revision = self.cached_mailbox.revision();
+            let mut visible = self.folders()?;
+            let projections = folders
+                .iter()
+                .map(|&role| {
+                    let id = mailbox.ensure_projection_folder(&mut visible, role);
+                    let rows = read_rows(&id, role)?;
+                    Ok((role, id, rows))
+                })
+                .collect::<anyhow::Result<Vec<_>>>()?;
+            if self.cached_mailbox.publish_local(
+                mailbox,
+                revision,
+                projections,
+                &self.action_queue,
+            ) {
+                return Ok(());
             }
         }
     }
@@ -415,13 +458,50 @@ impl AccountBackend {
         Ok(outcome)
     }
 
-    fn refresh_cache(&self) -> anyhow::Result<RefreshOutcome> {
+    fn refresh_cache(&self, cache_changed: &dyn Fn()) -> anyhow::Result<RefreshOutcome> {
+        let mailbox = LocalMailbox::new(&self.binding);
+        self.refresh_cache_with(
+            &mailbox,
+            cache_changed,
+            |changed| mailbox.submit_outbox(changed),
+            |id, role| self.load_folder_rows(&mailbox, id, Some(role)),
+            || AccountSession::open_online(&self.binding),
+        )
+    }
+
+    fn refresh_cache_with(
+        &self,
+        local_mailbox: &LocalMailbox<'_>,
+        cache_changed: &dyn Fn(),
+        submit_outbox: impl FnOnce(&mut dyn FnMut()) -> anyhow::Result<HashSet<NonZeroU64>>,
+        read_rows: impl Fn(&FolderId, LocalFolder) -> anyhow::Result<Vec<ConversationSummary>>,
+        open_provider: impl FnOnce() -> anyhow::Result<AccountSession>,
+    ) -> anyhow::Result<RefreshOutcome> {
+        let mut delivery_changed = false;
+        let submission = submit_outbox(&mut || delivery_changed = true);
+        if delivery_changed {
+            self.refresh_local_projection_with(
+                local_mailbox,
+                &[LocalFolder::Outbox, LocalFolder::Sent],
+                read_rows,
+            )?;
+            cache_changed();
+        }
+        let delivered = submission?;
+        let revision = self.cached_mailbox.revision();
+        self.synchronize_provider(local_mailbox, revision, delivered, open_provider)
+    }
+
+    fn synchronize_provider(
+        &self,
+        local_mailbox: &LocalMailbox<'_>,
+        revision: u64,
+        delivered: HashSet<NonZeroU64>,
+        open_provider: impl FnOnce() -> anyhow::Result<AccountSession>,
+    ) -> anyhow::Result<RefreshOutcome> {
         let binding = &self.binding;
-        let local_mailbox = LocalMailbox::new(binding);
-        let local_revision = self.cached_mailbox.revision();
         let move_intents = self.action_queue.moves_for_route(binding);
-        let outbox_submission = local_mailbox.submit_outbox()?;
-        let mut online_session = crate::integration::camel::AccountSession::open_online(binding)?;
+        let mut online_session = open_provider()?;
         let initial_folders = online_session.list_folders()?;
         let mut folders_to_refresh = initial_folders
             .iter()
@@ -451,13 +531,8 @@ impl AccountBackend {
         let delivery_synchronization = local_mailbox.synchronize_delivery(
             remote_sent.as_ref(),
             &mut online_session,
-            outbox_submission,
+            delivered,
         )?;
-        if delivery_synchronization.remote_changed
-            && let Some(remote_sent) = remote_sent.as_ref()
-        {
-            online_session.refresh_folder_info(remote_sent)?;
-        }
         let remote_drafts = local_mailbox
             .provider_folder(&folders, LocalFolder::Drafts)
             .map(|folder| folder.id.clone());
@@ -475,7 +550,7 @@ impl AccountBackend {
 
         let mut refreshed_conversations = HashMap::new();
         for folder_id in &folders_to_refresh {
-            let conversations = online_session.list_conversations(folder_id, 0, 0)?;
+            let conversations = online_session.list_conversations(folder_id)?;
             refreshed_conversations.insert(folder_id.clone(), conversations);
         }
         local_mailbox.project_folder(
@@ -499,7 +574,7 @@ impl AccountBackend {
         );
         let projection_stale = self.cached_mailbox.publish_remote(
             binding,
-            local_revision,
+            revision,
             folders,
             refreshed_conversations,
             &self.action_queue,
@@ -544,7 +619,7 @@ pub(super) fn slice_conversations(
     let end = if limit == 0 {
         conversations.len()
     } else {
-        (offset + limit).min(conversations.len())
+        offset.saturating_add(limit).min(conversations.len())
     };
 
     conversations[offset..end].to_vec()
@@ -581,15 +656,20 @@ impl MailBackend for AccountBackend {
         self.conversations(folder_id, offset, limit)
     }
 
-    fn fill_message_cache(&self, conversation_id: &ConversationId) -> anyhow::Result<bool> {
-        if self.read_cached_message_detail(conversation_id)?.is_some() {
-            return Ok(true);
-        }
+    fn fill_message_cache(&self, conversation_id: &ConversationId) -> anyhow::Result<()> {
         if LocalMailbox::new(&self.binding).contains(conversation_id) {
-            return Ok(false);
+            return Ok(());
         }
-        let mut session = crate::integration::camel::AccountSession::open_online(&self.binding)?;
-        Ok(session.get_message_detail(conversation_id)?.is_some())
+        if self.session()?
+            .lock()
+            .expect("camel account session lock poisoned")
+            .fill_message_cache(conversation_id)?
+        {
+            return Ok(());
+        }
+        crate::integration::camel::AccountSession::open_online(&self.binding)?
+            .fill_message_cache(conversation_id)?;
+        Ok(())
     }
 
     fn get_cached_message_detail(
@@ -649,8 +729,8 @@ impl MailBackend for AccountBackend {
         Ok(eds_matches)
     }
 
-    fn refresh(&self) -> anyhow::Result<RefreshOutcome> {
-        self.refresh_cache()
+    fn refresh(&self, cache_changed: &dyn Fn()) -> anyhow::Result<RefreshOutcome> {
+        self.refresh_cache(cache_changed)
     }
 
     fn set_starred(
@@ -702,7 +782,9 @@ impl MailBackend for AccountBackend {
     ) -> anyhow::Result<Option<StoredMessageRef>> {
         let local_mailbox = LocalMailbox::new(&self.binding);
         let detail = local_mailbox.save_draft(message)?;
-        self.refresh_local_projection(&local_mailbox, &[LocalFolder::Drafts]);
+        if let Err(error) = self.refresh_local_projection(&local_mailbox, &[LocalFolder::Drafts]) {
+            crate::logging::report_deferred("local-cache-projection", &error);
+        }
         Ok(Some(detail))
     }
 
@@ -712,10 +794,12 @@ impl MailBackend for AccountBackend {
         }
         let local_mailbox = LocalMailbox::new(&self.binding);
         local_mailbox.queue_delivery(message)?;
-        self.refresh_local_projection(
+        if let Err(error) = self.refresh_local_projection(
             &local_mailbox,
             &[LocalFolder::Drafts, LocalFolder::Outbox],
-        );
+        ) {
+            crate::logging::report_deferred("local-cache-projection", &error);
+        }
         Ok(WriteOutcome::Queued)
     }
 }

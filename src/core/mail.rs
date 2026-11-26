@@ -3,7 +3,7 @@ use std::sync::Arc;
 use crate::integration::backend::{
     BackendChangeMonitor, RefreshOutcome, SharedMailBackend, SharedMailBackendRouter,
 };
-use crate::model::account::{MailAccount, MailAccountId};
+use crate::model::account::{AccountIdentityEdit, MailAccountId};
 use crate::model::event::{AccountMailboxLoad, MailboxContentSnapshot};
 use crate::model::mail::{
     ConversationId, ConversationSummary, FolderId, MailFolder, MailboxMode, MessageAction,
@@ -52,9 +52,9 @@ impl MailService {
 
     pub(crate) fn save_account_identities(
         &self,
-        accounts: &[MailAccount],
+        edits: Vec<AccountIdentityEdit>,
     ) -> anyhow::Result<()> {
-        crate::integration::account::save_identities(accounts)
+        crate::integration::account::save_identities(edits)
     }
 
     pub fn activate_mailbox(
@@ -166,14 +166,14 @@ impl AccountMailService {
         self.backend.search(query)
     }
 
-    pub(crate) fn refresh(&self) -> anyhow::Result<RefreshOutcome> {
-        self.backend.refresh()
+    pub(crate) fn refresh(&self, cache_changed: &dyn Fn()) -> anyhow::Result<RefreshOutcome> {
+        self.backend.refresh(cache_changed)
     }
 
     pub(crate) fn fill_message_cache(
         &self,
         conversation_id: &ConversationId,
-    ) -> anyhow::Result<bool> {
+    ) -> anyhow::Result<()> {
         self.backend.fill_message_cache(conversation_id)
     }
 

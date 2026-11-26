@@ -67,6 +67,9 @@ msgstr "附件不可用。"
 msgid "Attachments"
 msgstr "附件"
 
+msgid "Attachments not added."
+msgstr "未添加附件。"
+
 msgid "Authentication failed"
 msgstr "认证失败"
 

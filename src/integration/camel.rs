@@ -1,17 +1,14 @@
-use std::cmp::Ordering;
 use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_int, c_uint, c_ulong, c_void};
 use std::ptr::{self, NonNull};
 use std::sync::Arc;
 
 use anyhow::{Result, anyhow};
-use percent_encoding::percent_decode_str;
 
 use super::{OwnedGObject, OwnedGlibString, take_gerror};
 use crate::integration::account::EdsAccountBinding;
 use crate::model::mail::{
-    AttachmentInfo, AttachmentLocation, ConversationId, ConversationSummary, FolderId, FolderKind,
-    MailFolder, MessageBody, MessageDetail, MessageId, StoredMessageRef,
+    ConversationId, ConversationSummary, FolderId, MailFolder, MessageDetail, StoredMessageRef,
     sort_and_deduplicate_conversations, sort_conversations,
 };
 
@@ -31,22 +28,21 @@ macro_rules! development_probe_log {
     };
 }
 
+mod folder;
+mod message;
+
+use folder::load_folder_tree;
+pub(crate) use message::AppendMessageRequest;
+pub(super) use message::decode_addresses;
+use message::{
+    append_cached_message, append_message_to_folder, export_attachment, load_message_detail,
+    load_mime_message,
+};
+
 const CAMEL_PROVIDER_STORE: c_int = 0;
 const CAMEL_PROVIDER_TRANSPORT: c_int = 1;
 const CAMEL_STORE_FOLDER_CREATE: c_uint = 1 << 0;
-const CAMEL_STORE_FOLDER_INFO_RECURSIVE: c_uint = 1 << 1;
-const CAMEL_STORE_FOLDER_INFO_SUBSCRIBED: c_uint = 1 << 2;
-const CAMEL_STORE_FOLDER_INFO_NO_VIRTUAL: c_uint = 1 << 3;
 const CAMEL_SERVICE_CONNECTED: c_int = 2;
-const CAMEL_FOLDER_TYPE_BIT: c_uint = 10;
-const CAMEL_FOLDER_TYPE_MASK: c_uint = 0x3F << CAMEL_FOLDER_TYPE_BIT;
-const CAMEL_FOLDER_TYPE_INBOX: c_uint = 1 << CAMEL_FOLDER_TYPE_BIT;
-const CAMEL_FOLDER_TYPE_OUTBOX: c_uint = 2 << CAMEL_FOLDER_TYPE_BIT;
-const CAMEL_FOLDER_TYPE_TRASH: c_uint = 3 << CAMEL_FOLDER_TYPE_BIT;
-const CAMEL_FOLDER_TYPE_JUNK: c_uint = 4 << CAMEL_FOLDER_TYPE_BIT;
-const CAMEL_FOLDER_TYPE_SENT: c_uint = 5 << CAMEL_FOLDER_TYPE_BIT;
-const CAMEL_FOLDER_TYPE_ARCHIVE: c_uint = 11 << CAMEL_FOLDER_TYPE_BIT;
-const CAMEL_FOLDER_TYPE_DRAFTS: c_uint = 12 << CAMEL_FOLDER_TYPE_BIT;
 const CAMEL_MESSAGE_FLAGGED: c_uint = 1 << 3;
 const CAMEL_MESSAGE_SEEN: c_uint = 1 << 4;
 const CAMEL_MESSAGE_DELETED: c_uint = 1 << 1;
@@ -60,24 +56,6 @@ pub(crate) const DELIVERY_COPY_REQUIRED: &str = "copy-required";
 const DRAFT_SYNCED_USER_FLAG: &str = "$DraftSynced";
 const DRAFT_SUPERSEDED_USER_FLAG: &str = "$DraftSuperseded";
 const CONVERSATION_ID_SEPARATOR: char = '\u{1f}';
-const CAMEL_RECIPIENT_TYPE_TO: &[u8] = b"To\0";
-const CAMEL_RECIPIENT_TYPE_CC: &[u8] = b"Cc\0";
-const CAMEL_RECIPIENT_TYPE_BCC: &[u8] = b"Bcc\0";
-
-pub(crate) struct AppendMessageRequest<'a> {
-    pub message_id: Option<&'a str>,
-    pub folder_id: &'a FolderId,
-    pub from: &'a str,
-    pub reply_to: Option<&'a str>,
-    pub to: &'a [String],
-    pub cc: &'a [String],
-    pub bcc: &'a [String],
-    pub subject: &'a str,
-    pub html_body: &'a str,
-    pub plain_body: &'a str,
-    pub attachment_uris: &'a [String],
-    pub is_draft: bool,
-}
 
 enum ESourceRegistry {}
 enum ESource {}
@@ -89,8 +67,6 @@ enum CamelOfflineStore {}
 enum CamelFolder {}
 enum CamelFolderSummary {}
 enum CamelMessageInfo {}
-enum CamelMimeMessage {}
-enum CamelInternetAddress {}
 
 struct OwnedPtrArray(NonNull<glib::ffi::GPtrArray>);
 
@@ -103,24 +79,16 @@ impl OwnedPtrArray {
         self.0.as_ptr()
     }
 
-    fn len(&self) -> usize {
-        unsafe { self.0.as_ref().len as usize }
-    }
-
-    fn is_empty(&self) -> bool {
-        self.len() == 0
-    }
-
-    fn values(&self) -> Result<Vec<glib::ffi::gpointer>> {
-        let len = self.len();
+    fn values(&self) -> Result<&[glib::ffi::gpointer]> {
+        let array = unsafe { self.0.as_ref() };
+        let len = array.len as usize;
         if len == 0 {
-            return Ok(Vec::new());
+            return Ok(&[]);
         }
-        let values = unsafe { self.0.as_ref().pdata };
-        if values.is_null() {
+        if array.pdata.is_null() {
             return Err(anyhow!("GPtrArray contains elements without storage"));
         }
-        Ok(unsafe { std::slice::from_raw_parts(values, len) }.to_vec())
+        Ok(unsafe { std::slice::from_raw_parts(array.pdata, len) })
     }
 }
 
@@ -275,36 +243,6 @@ pub(crate) struct MessageSyncState {
     pub(crate) draft_superseded: bool,
 }
 
-#[repr(C)]
-struct CamelFolderInfo {
-    next: *mut CamelFolderInfo,
-    parent: *mut CamelFolderInfo,
-    child: *mut CamelFolderInfo,
-    full_name: *mut c_char,
-    display_name: *mut c_char,
-    flags: c_uint,
-    unread: c_int,
-    total: c_int,
-}
-
-struct OwnedFolderInfo(NonNull<CamelFolderInfo>);
-
-impl OwnedFolderInfo {
-    unsafe fn from_ptr(pointer: *mut CamelFolderInfo) -> Option<Self> {
-        NonNull::new(pointer).map(Self)
-    }
-
-    fn as_ptr(&self) -> *mut CamelFolderInfo {
-        self.0.as_ptr()
-    }
-}
-
-impl Drop for OwnedFolderInfo {
-    fn drop(&mut self) {
-        unsafe { camel_folder_info_free(self.0.as_ptr()) };
-    }
-}
-
 #[allow(clashing_extern_declarations)]
 #[link(name = "camel-1.2")]
 #[link(name = "edataserver-1.2")]
@@ -326,14 +264,6 @@ unsafe extern "C" {
         error: *mut *mut glib::ffi::GError,
     ) -> glib::ffi::gboolean;
     fn camel_service_get_connection_status(service: *mut CamelService) -> c_int;
-    fn camel_service_get_user_cache_dir(service: *mut CamelService) -> *const c_char;
-    fn camel_store_get_folder_info_sync(
-        store: *mut CamelStore,
-        top: *const c_char,
-        flags: c_uint,
-        cancellable: *mut gio::ffi::GCancellable,
-        error: *mut *mut glib::ffi::GError,
-    ) -> *mut CamelFolderInfo;
     fn camel_store_get_folder_sync(
         store: *mut CamelStore,
         folder_name: *const c_char,
@@ -341,13 +271,11 @@ unsafe extern "C" {
         cancellable: *mut gio::ffi::GCancellable,
         error: *mut *mut glib::ffi::GError,
     ) -> *mut CamelFolder;
-    fn camel_folder_info_free(info: *mut CamelFolderInfo);
     fn camel_folder_get_folder_summary(folder: *mut CamelFolder) -> *mut CamelFolderSummary;
     fn camel_folder_summary_save(
         summary: *mut CamelFolderSummary,
         error: *mut *mut glib::ffi::GError,
     ) -> glib::ffi::gboolean;
-    fn camel_folder_get_message_count(folder: *mut CamelFolder) -> c_int;
     fn camel_folder_get_message_flags(
         folder: *mut CamelFolder,
         message_uid: *const c_char,
@@ -360,6 +288,12 @@ unsafe extern "C" {
     ) -> glib::ffi::gboolean;
     fn camel_folder_expunge_sync(
         folder: *mut CamelFolder,
+        cancellable: *mut gio::ffi::GCancellable,
+        error: *mut *mut glib::ffi::GError,
+    ) -> glib::ffi::gboolean;
+    fn camel_folder_synchronize_sync(
+        folder: *mut CamelFolder,
+        expunge: glib::ffi::gboolean,
         cancellable: *mut gio::ffi::GCancellable,
         error: *mut *mut glib::ffi::GError,
     ) -> glib::ffi::gboolean;
@@ -379,17 +313,6 @@ unsafe extern "C" {
         cancellable: *mut gio::ffi::GCancellable,
         error: *mut *mut glib::ffi::GError,
     ) -> glib::ffi::gboolean;
-    fn camel_folder_get_message_cached(
-        folder: *mut CamelFolder,
-        message_uid: *const c_char,
-        cancellable: *mut gio::ffi::GCancellable,
-    ) -> *mut CamelMimeMessage;
-    fn camel_folder_get_message_sync(
-        folder: *mut CamelFolder,
-        message_uid: *const c_char,
-        cancellable: *mut gio::ffi::GCancellable,
-        error: *mut *mut glib::ffi::GError,
-    ) -> *mut CamelMimeMessage;
     fn camel_folder_refresh_info_sync(
         folder: *mut CamelFolder,
         cancellable: *mut gio::ffi::GCancellable,
@@ -418,6 +341,8 @@ unsafe extern "C" {
         uid: *const c_char,
     ) -> *mut CamelMessageInfo;
     fn camel_message_info_get_flags(info: *const CamelMessageInfo) -> c_uint;
+    fn camel_message_info_property_lock(info: *const CamelMessageInfo);
+    fn camel_message_info_property_unlock(info: *const CamelMessageInfo);
     fn camel_message_info_get_message_id(info: *const CamelMessageInfo) -> u64;
     fn camel_message_info_get_user_flag(
         info: *const CamelMessageInfo,
@@ -427,6 +352,10 @@ unsafe extern "C" {
         info: *const CamelMessageInfo,
         name: *const c_char,
     ) -> *const c_char;
+    fn camel_message_info_dup_user_tag(
+        info: *const CamelMessageInfo,
+        name: *const c_char,
+    ) -> *mut c_char;
     fn camel_message_info_set_user_tag(
         info: *mut CamelMessageInfo,
         name: *const c_char,
@@ -446,28 +375,6 @@ unsafe extern "C" {
     fn camel_message_info_get_preview(info: *const CamelMessageInfo) -> *const c_char;
     fn camel_message_info_get_date_sent(info: *const CamelMessageInfo) -> i64;
     fn camel_message_info_get_date_received(info: *const CamelMessageInfo) -> i64;
-    fn camel_mime_message_get_subject(message: *mut CamelMimeMessage) -> *const c_char;
-    fn camel_mime_message_get_message_id(message: *mut CamelMimeMessage) -> *const c_char;
-    fn camel_mime_message_get_from(message: *mut CamelMimeMessage) -> *mut CamelInternetAddress;
-    fn camel_mime_message_get_reply_to(message: *mut CamelMimeMessage)
-    -> *mut CamelInternetAddress;
-    fn camel_mime_message_get_recipients(
-        message: *mut CamelMimeMessage,
-        recipient_type: *const c_char,
-    ) -> *mut CamelInternetAddress;
-    fn camel_mime_message_get_date(message: *mut CamelMimeMessage, offset: *mut c_int) -> i64;
-    fn camel_mime_message_get_date_received(
-        message: *mut CamelMimeMessage,
-        offset: *mut c_int,
-    ) -> i64;
-    fn camel_internet_address_get(
-        addr: *mut CamelInternetAddress,
-        index: c_int,
-        namep: *mut *const c_char,
-        addressp: *mut *const c_char,
-    ) -> glib::ffi::gboolean;
-    fn camel_internet_address_new() -> *mut CamelInternetAddress;
-    fn camel_address_decode(address: *mut c_void, raw: *const c_char) -> c_int;
 
     fn e_source_registry_new_sync(
         cancellable: *mut gio::ffi::GCancellable,
@@ -482,7 +389,7 @@ unsafe extern "C" {
         extension_name: *const c_char,
     ) -> glib::ffi::gboolean;
     fn e_source_get_uid(source: *mut ESource) -> *const c_char;
-    fn e_source_get_parent(source: *mut ESource) -> *const c_char;
+    fn e_source_dup_parent(source: *mut ESource) -> *mut c_char;
     fn e_source_camel_get_extension_name(protocol: *const c_char) -> *const c_char;
     fn e_source_camel_configure_service(source: *mut ESource, service: *mut CamelService);
     fn camel_url_encode(value: *const c_char, extra: *const c_char) -> *mut c_char;
@@ -491,19 +398,6 @@ unsafe extern "C" {
     fn mail_bridge_eds_configure_local_store(
         service: *mut CamelService,
     ) -> glib::ffi::gboolean;
-    fn mail_bridge_eds_extract_message_bodies(
-        message: *mut CamelMimeMessage,
-        out_html: *mut *mut c_char,
-        out_plain: *mut *mut c_char,
-    ) -> glib::ffi::gboolean;
-    fn mail_bridge_eds_extract_message_attachments(message: *mut CamelMimeMessage) -> *mut c_char;
-    fn mail_bridge_eds_extract_attachment_to_file(
-        message: *mut CamelMimeMessage,
-        cache_root: *const c_char,
-        cache_key: *const c_char,
-        attachment_token: *const c_char,
-        error: *mut *mut glib::ffi::GError,
-    ) -> *mut c_char;
     fn mail_bridge_camel_folder_watch_changes(
         folder: *mut CamelFolder,
         callback: Option<unsafe extern "C" fn(*mut c_void)>,
@@ -511,32 +405,6 @@ unsafe extern "C" {
         destroy: Option<unsafe extern "C" fn(*mut c_void)>,
     ) -> c_ulong;
     fn mail_bridge_camel_folder_unwatch_changes(folder: *mut CamelFolder, handler_id: c_ulong);
-    fn mail_bridge_eds_append_text_message(
-        folder: *mut CamelFolder,
-        source_uid: *const c_char,
-        message_id: *const c_char,
-        from: *const c_char,
-        reply_to: *const c_char,
-        to_serialized: *const c_char,
-        cc_serialized: *const c_char,
-        bcc_serialized: *const c_char,
-        subject: *const c_char,
-        html_body: *const c_char,
-        plain_body: *const c_char,
-        attachment_uris_serialized: *const c_char,
-        is_draft: glib::ffi::gboolean,
-        out_appended_uid: *mut *mut c_char,
-        out_message_id: *mut *mut c_char,
-        error: *mut *mut glib::ffi::GError,
-    ) -> glib::ffi::gboolean;
-    fn mail_bridge_eds_append_cached_message(
-        source_folder: *mut CamelFolder,
-        message_uid: *const c_char,
-        destination_folder: *mut CamelFolder,
-        is_draft: glib::ffi::gboolean,
-        out_appended_uid: *mut *mut c_char,
-        error: *mut *mut glib::ffi::GError,
-    ) -> glib::ffi::gboolean;
     fn mail_bridge_eds_transport_send_cached_message(
         transport: *mut CamelTransport,
         folder: *mut CamelFolder,
@@ -692,10 +560,8 @@ impl AccountSession {
     pub(crate) fn list_conversations(
         &mut self,
         folder_id: &FolderId,
-        offset: usize,
-        limit: usize,
     ) -> Result<Vec<ConversationSummary>> {
-        unsafe { load_folder_conversations(self.store, folder_id, offset, limit) }
+        unsafe { load_folder_conversations(self.store, folder_id) }
     }
 
     pub(crate) fn prepare_folder_for_synchronization(
@@ -751,14 +617,18 @@ impl AccountSession {
         conversation_id: &ConversationId,
         provider_copy_expected: bool,
     ) -> Result<()> {
-        self.set_delivery_state(
-            conversation_id,
-            if provider_copy_expected {
-                DELIVERY_PROVIDER_COPY
-            } else {
-                DELIVERY_COPY_REQUIRED
-            },
-        )
+        if provider_copy_expected {
+            self.expect_provider_sent_copy(conversation_id)
+        } else {
+            self.set_delivery_state(conversation_id, DELIVERY_COPY_REQUIRED)
+        }
+    }
+
+    pub(crate) fn expect_provider_sent_copy(
+        &mut self,
+        conversation_id: &ConversationId,
+    ) -> Result<()> {
+        self.set_delivery_state(conversation_id, DELIVERY_PROVIDER_COPY)
     }
 
     fn set_delivery_state(
@@ -844,6 +714,16 @@ impl AccountSession {
     ) -> Result<()> {
         let (folder_name, uid) = conversation_location(conversation_id)?;
         unsafe { set_message_user_flag(self.store, folder_name, uid, flag, enabled) }
+    }
+
+    pub(crate) fn fill_message_cache(&self, conversation_id: &ConversationId) -> Result<bool> {
+        let (folder_name, uid) = conversation_location(conversation_id)?;
+        let uid = CString::new(uid).map_err(|_| anyhow!("message uid contains interior NUL"))?;
+        let folder = unsafe { get_folder(self.store, folder_name) }?;
+        let message = unsafe {
+            load_mime_message(folder.as_ptr(), &uid, self.access_mode.may_load_message())?
+        };
+        Ok(message.is_some())
     }
 
     pub(crate) fn get_message_detail(
@@ -970,12 +850,31 @@ impl AccountSession {
         unsafe { synchronize_store(self.store) }
     }
 
-    pub(crate) fn delete_message_permanently(
+    pub(crate) fn mark_message_deleted(&mut self, conversation_id: &ConversationId) -> Result<()> {
+        let (folder_name, uid) = conversation_location(conversation_id)?;
+        unsafe { set_message_flag(self.store, folder_name, uid, CAMEL_MESSAGE_DELETED, true) }
+    }
+
+    pub(crate) fn synchronize_folder_flags(&mut self, folder_id: &FolderId) -> Result<()> {
+        let folder = unsafe { get_folder(self.store, &folder_id.0) }?;
+        let mut error = ptr::null_mut();
+        if unsafe {
+            camel_folder_synchronize_sync(folder.as_ptr(), 0, ptr::null_mut(), &mut error)
+        } == 0
+        {
+            return Err(take_gerror(error)
+                .unwrap_or_else(|| anyhow!("camel_folder_synchronize_sync returned FALSE")));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn delete_local_message(
         &mut self,
         conversation_id: &ConversationId,
     ) -> Result<()> {
+        assert!(matches!(self.access_mode, CamelAccessMode::Local));
         let (folder_name, uid) = conversation_location(conversation_id)?;
-        unsafe { delete_message_permanently(self.store, folder_name, uid) }
+        unsafe { expunge_local_message(self.store, folder_name, uid) }
     }
 
     pub(crate) fn append_message(
@@ -1312,7 +1211,8 @@ unsafe fn source_has_extension(source: *mut ESource, extension_name: &str) -> bo
 }
 
 unsafe fn source_parent_uid(source: *mut ESource) -> Option<String> {
-    cstr_to_string(unsafe { e_source_get_parent(source) })
+    unsafe { OwnedGlibString::from_ptr(e_source_dup_parent(source)) }
+        .map(|parent| parent.to_string_lossy())
 }
 
 unsafe fn source_uid(source: *mut ESource) -> Option<String> {
@@ -1359,31 +1259,12 @@ unsafe fn connect_service(service: *mut CamelService) -> Result<()> {
 unsafe fn load_folder_conversations(
     store: *mut CamelStore,
     folder_id: &FolderId,
-    offset: usize,
-    limit: usize,
 ) -> Result<Vec<ConversationSummary>> {
     let folder = unsafe { get_folder(store, &folder_id.0) }?;
 
     unsafe {
-        let mut uids = load_folder_uids(folder.as_ptr(), &folder_id.0, false)?;
-        let initial_uid_len = uids.len();
-        let message_count = camel_folder_get_message_count(folder.as_ptr());
-
-        if initial_uid_len == 0 && message_count > 0 {
-            uids = load_folder_uids(folder.as_ptr(), &folder_id.0, true)?;
-        }
-
-        if uids.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        collect_conversations(
-            folder.as_ptr(),
-            &folder_id.0,
-            uids.values()?,
-            offset,
-            limit,
-        )
+        let uids = load_folder_uids(folder.as_ptr(), &folder_id.0)?;
+        collect_conversations(folder.as_ptr(), &folder_id.0, uids.values()?)
     }
 }
 
@@ -1393,7 +1274,7 @@ unsafe fn load_message_sync_states(
 ) -> Result<Vec<MessageSyncState>> {
     let folder = unsafe { get_folder(store, &folder_id.0) }?;
     unsafe {
-        let uids = load_folder_uids(folder.as_ptr(), &folder_id.0, false)?;
+        let uids = load_folder_uids(folder.as_ptr(), &folder_id.0)?;
         let delivery_state_tag =
             CString::new(DELIVERY_STATE_USER_TAG).expect("static tag is valid");
         let draft_synced_flag =
@@ -1401,30 +1282,33 @@ unsafe fn load_message_sync_states(
         let draft_superseded_flag =
             CString::new(DRAFT_SUPERSEDED_USER_FLAG).expect("static flag is valid");
         let mut states = Vec::new();
-        for uid_ptr in uids.values()? {
+        for &uid_ptr in uids.values()? {
             let uid = cstr_to_string(uid_ptr as *const c_char).ok_or_else(|| {
                 anyhow!("Camel returned an invalid message UID in folder '{}'", folder_id.0)
             })?;
             let info = get_message_info(folder.as_ptr(), &uid)?;
-            states.push(MessageSyncState {
-                conversation_id: ConversationId(format!(
-                    "{}{}{}",
-                    folder_id.0, CONVERSATION_ID_SEPARATOR, uid
-                )),
-                message_id_hash: camel_message_info_get_message_id(info.as_ptr()),
-                delivery_state: cstr_to_string(camel_message_info_get_user_tag(
-                    info.as_ptr(),
-                    delivery_state_tag.as_ptr(),
-                )),
-                draft_synced: camel_message_info_get_user_flag(
-                    info.as_ptr(),
-                    draft_synced_flag.as_ptr(),
-                ) != 0,
-                draft_superseded: camel_message_info_get_user_flag(
-                    info.as_ptr(),
-                    draft_superseded_flag.as_ptr(),
-                ) != 0,
+            let state = with_message_info_properties(info.as_ptr(), || {
+                if camel_message_info_get_flags(info.as_ptr()) & CAMEL_MESSAGE_DELETED != 0 {
+                    return None;
+                }
+                Some(MessageSyncState {
+                    conversation_id: ConversationId(compose_conversation_id(&folder_id.0, &uid)),
+                    message_id_hash: camel_message_info_get_message_id(info.as_ptr()),
+                    delivery_state: cstr_to_string(camel_message_info_get_user_tag(
+                        info.as_ptr(),
+                        delivery_state_tag.as_ptr(),
+                    )),
+                    draft_synced: camel_message_info_get_user_flag(
+                        info.as_ptr(),
+                        draft_synced_flag.as_ptr(),
+                    ) != 0,
+                    draft_superseded: camel_message_info_get_user_flag(
+                        info.as_ptr(),
+                        draft_superseded_flag.as_ptr(),
+                    ) != 0,
+                })
             });
+            states.extend(state);
         }
         Ok(states)
     }
@@ -1476,56 +1360,7 @@ unsafe fn search_folder_conversations(
         let Some(uids) = uids else {
             return Ok(Vec::new());
         };
-        if uids.is_empty() {
-            return Ok(Vec::new());
-        }
-        collect_conversations(
-            folder.as_ptr(),
-            &folder_id.0,
-            uids.values()?,
-            0,
-            0,
-        )
-    }
-}
-
-unsafe fn load_message_detail(
-    store: *mut CamelStore,
-    folder_name: &str,
-    uid: &str,
-    conversation_id: &ConversationId,
-    allow_message_load: bool,
-) -> Result<Option<MessageDetail>> {
-    let uid_c = CString::new(uid).map_err(|_| anyhow!("message uid contains interior NUL"))?;
-    let folder = unsafe { get_folder(store, folder_name) }?;
-
-    unsafe {
-        let message_info = get_message_info(folder.as_ptr(), uid)?;
-        let mut message = get_cached_message(folder.as_ptr(), &uid_c);
-        if message.is_none() && allow_message_load {
-            let mut error = ptr::null_mut();
-            let loaded = camel_folder_get_message_sync(
-                folder.as_ptr(),
-                uid_c.as_ptr(),
-                ptr::null_mut(),
-                &mut error,
-            );
-            let Some(loaded) = OwnedGObject::from_ptr(loaded) else {
-                return Err(take_gerror(error)
-                    .unwrap_or_else(|| anyhow!("camel_folder_get_message_sync returned NULL")));
-            };
-            message = Some(loaded);
-        }
-        let Some(message) = message else {
-            return Ok(None);
-        };
-        build_message_detail(
-            uid,
-            conversation_id,
-            message_info.as_ptr(),
-            message.as_ptr(),
-        )
-        .map(Some)
+        collect_conversations(folder.as_ptr(), &folder_id.0, uids.values()?)
     }
 }
 
@@ -1619,11 +1454,11 @@ unsafe fn set_message_user_tag(
         ))
         .ok_or_else(|| anyhow!("Camel message info is missing while changing delivery state"))?;
         camel_message_info_set_user_tag(info.as_ptr(), name_c.as_ptr(), value_c.as_ptr());
-        let stored = cstr_to_string(camel_message_info_get_user_tag(
+        let stored = OwnedGlibString::from_ptr(camel_message_info_dup_user_tag(
             info.as_ptr(),
             name_c.as_ptr(),
         ));
-        if stored.as_deref() != Some(value) {
+        if stored.map(|tag| tag.to_string_lossy()).as_deref() != Some(value) {
             return Err(anyhow!("Camel did not persist the message delivery state"));
         }
         save_folder_summary(folder.as_ptr())
@@ -1736,7 +1571,7 @@ unsafe fn synchronize_store(store: *mut CamelStore) -> Result<()> {
     Ok(())
 }
 
-unsafe fn delete_message_permanently(
+unsafe fn expunge_local_message(
     store: *mut CamelStore,
     folder_name: &str,
     uid: &str,
@@ -1744,13 +1579,14 @@ unsafe fn delete_message_permanently(
     let folder = unsafe { get_folder(store, folder_name) }?;
     unsafe {
         let uid = CString::new(uid).map_err(|_| anyhow!("message uid contains interior NUL"))?;
-        let changed = camel_folder_set_message_flags(
+        camel_folder_set_message_flags(
             folder.as_ptr(),
             uid.as_ptr(),
-            CAMEL_MESSAGE_DELETED | CAMEL_MESSAGE_SEEN,
-            CAMEL_MESSAGE_DELETED | CAMEL_MESSAGE_SEEN,
+            CAMEL_MESSAGE_DELETED,
+            CAMEL_MESSAGE_DELETED,
         );
-        if changed == 0 {
+        let flags = camel_folder_get_message_flags(folder.as_ptr(), uid.as_ptr());
+        if flags & CAMEL_MESSAGE_DELETED == 0 {
             return Err(anyhow!(
                 "Camel did not mark the message deleted"
             ));
@@ -1762,216 +1598,6 @@ unsafe fn delete_message_permanently(
         }
         Ok(())
     }
-}
-
-unsafe fn append_cached_message(
-    source_store: *mut CamelStore,
-    source_folder_name: &str,
-    message_uid: &str,
-    destination_store: *mut CamelStore,
-    destination_folder_id: &FolderId,
-    is_draft: bool,
-) -> Result<()> {
-    let source_folder = unsafe { get_folder(source_store, source_folder_name) }?;
-    let destination_folder =
-        unsafe { get_folder(destination_store, &destination_folder_id.0) }?;
-    unsafe {
-        let message_uid =
-            CString::new(message_uid).map_err(|_| anyhow!("message uid contains interior NUL"))?;
-        let mut error = ptr::null_mut();
-        let success = mail_bridge_eds_append_cached_message(
-            source_folder.as_ptr(),
-            message_uid.as_ptr(),
-            destination_folder.as_ptr(),
-            if is_draft { 1 } else { 0 },
-            ptr::null_mut(),
-            &mut error,
-        );
-        if success == 0 {
-            return Err(take_gerror(error).unwrap_or_else(|| {
-                anyhow!("mail_bridge_eds_append_cached_message returned FALSE")
-            }));
-        }
-        Ok(())
-    }
-}
-
-unsafe fn export_attachment(
-    store: *mut CamelStore,
-    service: *mut CamelService,
-    folder_name: &str,
-    uid: &str,
-    conversation_id: &ConversationId,
-    attachment_uri: &str,
-    allow_message_load: bool,
-) -> Result<Option<String>> {
-    let uid_c = CString::new(uid).map_err(|_| anyhow!("message uid contains interior NUL"))?;
-    let cache_root = unsafe { service_user_cache_dir(service) }
-        .ok_or_else(|| anyhow!("camel_service_get_user_cache_dir returned NULL"))?;
-    let cache_root =
-        CString::new(cache_root).map_err(|_| anyhow!("cache root contains interior NUL"))?;
-    let cache_key = CString::new(conversation_id.0.as_str())
-        .map_err(|_| anyhow!("conversation id contains interior NUL"))?;
-    let attachment_uri = CString::new(attachment_uri)
-        .map_err(|_| anyhow!("attachment uri contains interior NUL"))?;
-    let folder = unsafe { get_folder(store, folder_name) }?;
-
-    unsafe {
-        let mut message = get_cached_message(folder.as_ptr(), &uid_c);
-        if message.is_none() && allow_message_load {
-            let mut error = ptr::null_mut();
-            let loaded = camel_folder_get_message_sync(
-                folder.as_ptr(),
-                uid_c.as_ptr(),
-                ptr::null_mut(),
-                &mut error,
-            );
-            let Some(loaded) = OwnedGObject::from_ptr(loaded) else {
-                return Err(take_gerror(error)
-                    .unwrap_or_else(|| anyhow!("camel_folder_get_message_sync returned NULL")));
-            };
-            message = Some(loaded);
-        }
-        let Some(message) = message else {
-            return Ok(None);
-        };
-
-        let mut error = ptr::null_mut();
-        let exported_uri = OwnedGlibString::from_ptr(
-            mail_bridge_eds_extract_attachment_to_file(
-                message.as_ptr(),
-                cache_root.as_ptr(),
-                cache_key.as_ptr(),
-                attachment_uri.as_ptr(),
-                &mut error,
-            ),
-        )
-        .ok_or_else(|| {
-            take_gerror(error).unwrap_or_else(|| {
-                anyhow!("mail_bridge_eds_extract_attachment_to_file returned NULL")
-            })
-        })?;
-        let uri = exported_uri.to_string_lossy();
-        let uri = (!uri.is_empty()).then_some(uri).ok_or_else(|| {
-            anyhow!("mail_bridge_eds_extract_attachment_to_file returned an empty URI")
-        })?;
-        Ok(Some(uri))
-    }
-}
-
-unsafe fn append_message_to_folder(
-    store: *mut CamelStore,
-    source_uid: &str,
-    request: &AppendMessageRequest<'_>,
-) -> Result<StoredMessageRef> {
-    let folder = unsafe { get_folder(store, &request.folder_id.0) }?;
-
-    unsafe {
-        let source_uid_c =
-            CString::new(source_uid).map_err(|_| anyhow!("source uid contains interior NUL"))?;
-        let message_id = request
-            .message_id
-            .map(CString::new)
-            .transpose()
-            .map_err(|_| anyhow!("message id contains interior NUL"))?;
-        let from = CString::new(request.from).map_err(|_| anyhow!("from contains interior NUL"))?;
-        let reply_to = request
-            .reply_to
-            .map(CString::new)
-            .transpose()
-            .map_err(|_| anyhow!("reply-to contains interior NUL"))?;
-        let to_serialized = serialize_recipients(request.to)?;
-        let cc_serialized = serialize_recipients(request.cc)?;
-        let bcc_serialized = serialize_recipients(request.bcc)?;
-        let subject =
-            CString::new(request.subject).map_err(|_| anyhow!("subject contains interior NUL"))?;
-        let html_body = CString::new(request.html_body)
-            .map_err(|_| anyhow!("html body contains interior NUL"))?;
-        let plain_body = CString::new(request.plain_body)
-            .map_err(|_| anyhow!("plain body contains interior NUL"))?;
-        let attachment_uris = serialize_attachment_uris(request.attachment_uris)?;
-        let mut appended_uid = ptr::null_mut();
-        let mut stored_message_id = ptr::null_mut();
-        let mut error = ptr::null_mut();
-
-        let ok = mail_bridge_eds_append_text_message(
-            folder.as_ptr(),
-            source_uid_c.as_ptr(),
-            message_id
-                .as_ref()
-                .map_or(ptr::null(), |value| value.as_ptr()),
-            from.as_ptr(),
-            reply_to
-                .as_ref()
-                .map_or(ptr::null(), |value| value.as_ptr()),
-            to_serialized.as_ptr(),
-            cc_serialized.as_ptr(),
-            bcc_serialized.as_ptr(),
-            subject.as_ptr(),
-            html_body.as_ptr(),
-            plain_body.as_ptr(),
-            attachment_uris.as_ptr(),
-            if request.is_draft { 1 } else { 0 },
-            &mut appended_uid,
-            &mut stored_message_id,
-            &mut error,
-        );
-        let appended_uid = OwnedGlibString::from_ptr(appended_uid);
-        let stored_message_id = OwnedGlibString::from_ptr(stored_message_id);
-        if ok == 0 {
-            return Err(take_gerror(error)
-                .unwrap_or_else(|| anyhow!("mail_bridge_eds_append_text_message failed")));
-        }
-
-        let appended_uid = appended_uid
-            .as_ref()
-            .map_or_else(String::new, OwnedGlibString::to_string_lossy);
-        let message_id = stored_message_id
-            .as_ref()
-            .map_or_else(String::new, OwnedGlibString::to_string_lossy);
-
-        anyhow::ensure!(!appended_uid.is_empty(), "Camel local append returned no message UID");
-        anyhow::ensure!(!message_id.is_empty(), "Camel local append returned no Message-ID");
-
-        let conversation_id = ConversationId(format!(
-            "{}{}{}",
-            request.folder_id.0, CONVERSATION_ID_SEPARATOR, appended_uid
-        ));
-        Ok(StoredMessageRef {
-            conversation_id,
-            message_id: MessageId(message_id),
-        })
-    }
-}
-
-fn serialize_recipients(values: &[String]) -> Result<CString> {
-    let mut serialized = Vec::with_capacity(values.len());
-    for value in values {
-        let value = value.trim();
-        if value.is_empty() {
-            continue;
-        }
-        if value.contains('\r') || value.contains('\n') {
-            return Err(anyhow!("recipient contains a line break"));
-        }
-        serialized.push(value);
-    }
-    CString::new(serialized.join("\n")).map_err(|_| anyhow!("recipient contains interior NUL"))
-}
-
-fn serialize_attachment_uris(values: &[String]) -> Result<CString> {
-    let mut serialized = Vec::with_capacity(values.len());
-    for value in values {
-        let value = value.trim();
-        if value.is_empty() {
-            continue;
-        }
-        if value.contains('\r') || value.contains('\n') {
-            return Err(anyhow!("attachment URI contains a line break"));
-        }
-        serialized.push(value);
-    }
-    CString::new(serialized.join("\n")).map_err(|_| anyhow!("attachment URI contains interior NUL"))
 }
 
 unsafe fn refresh_folder_info(store: *mut CamelStore, folder_name: &str) -> Result<()> {
@@ -1991,7 +1617,6 @@ unsafe fn refresh_folder_info(store: *mut CamelStore, folder_name: &str) -> Resu
 unsafe fn load_folder_uids(
     folder: *mut CamelFolder,
     folder_name: &str,
-    refresh_if_needed: bool,
 ) -> Result<OwnedPtrArray> {
     let summary = unsafe { camel_folder_get_folder_summary(folder) };
     if summary.is_null() {
@@ -1999,19 +1624,6 @@ unsafe fn load_folder_uids(
             "Camel folder '{}' does not expose a folder summary",
             folder_name
         ));
-    }
-
-    if refresh_if_needed {
-        let mut error = ptr::null_mut();
-        let ok = unsafe { camel_folder_refresh_info_sync(folder, ptr::null_mut(), &mut error) };
-        if ok == 0 {
-            return Err(take_gerror(error).unwrap_or_else(|| {
-                anyhow!(
-                    "camel_folder_refresh_info_sync failed for '{}'",
-                    folder_name
-                )
-            }));
-        }
     }
 
     let mut error = ptr::null_mut();
@@ -2113,36 +1725,22 @@ unsafe fn get_folder_with_flags(
 unsafe fn collect_conversations(
     folder: *mut CamelFolder,
     folder_name: &str,
-    uid_values: Vec<glib::ffi::gpointer>,
-    offset: usize,
-    limit: usize,
+    uid_values: &[glib::ffi::gpointer],
 ) -> Result<Vec<ConversationSummary>> {
     let mut conversations = Vec::with_capacity(uid_values.len());
 
-    for uid_ptr in uid_values {
+    for &uid_ptr in uid_values {
         let uid = cstr_to_string(uid_ptr as *const c_char).ok_or_else(|| {
             anyhow!("Camel returned an invalid message UID in folder '{folder_name}'")
         })?;
         let message_info = unsafe { get_message_info(folder, &uid) }?;
-        conversations.push(unsafe {
+        conversations.extend(unsafe {
             conversation_from_message_info(message_info.as_ptr(), folder_name, &uid)
         });
     }
 
     sort_conversations(&mut conversations);
-    if offset >= conversations.len() {
-        return Ok(Vec::new());
-    }
-    let end = if limit == 0 {
-        conversations.len()
-    } else {
-        (offset + limit).min(conversations.len())
-    };
-    Ok(conversations
-        .into_iter()
-        .skip(offset)
-        .take(end - offset)
-        .collect())
+    Ok(conversations)
 }
 
 unsafe fn get_message_info(
@@ -2155,29 +1753,49 @@ unsafe fn get_message_info(
         .ok_or_else(|| anyhow!("camel_folder_get_message_info returned NULL"))
 }
 
-unsafe fn get_cached_message(
-    folder: *mut CamelFolder,
-    uid: &CStr,
-) -> Option<OwnedGObject<CamelMimeMessage>> {
-    unsafe {
-        OwnedGObject::from_ptr(camel_folder_get_message_cached(
-            folder,
-            uid.as_ptr(),
-            ptr::null_mut(),
-        ))
+// The property getters return borrowed values. Copy them before releasing Camel's lock.
+unsafe fn with_message_info_properties<T>(
+    info: *const CamelMessageInfo,
+    read: impl FnOnce() -> T,
+) -> T {
+    struct PropertyGuard(*const CamelMessageInfo);
+
+    impl Drop for PropertyGuard {
+        fn drop(&mut self) {
+            unsafe { camel_message_info_property_unlock(self.0) };
+        }
     }
+
+    unsafe { camel_message_info_property_lock(info) };
+    let _guard = PropertyGuard(info);
+    read()
 }
 
 unsafe fn conversation_from_message_info(
     info: *mut CamelMessageInfo,
     folder_name: &str,
     uid: &str,
-) -> ConversationSummary {
-    let flags = unsafe { camel_message_info_get_flags(info) };
-    let subject = cstr_to_string(unsafe { camel_message_info_get_subject(info) })
+) -> Option<ConversationSummary> {
+    let (flags, subject, from, preview, sent, received) = unsafe {
+        with_message_info_properties(info, || {
+            let flags = camel_message_info_get_flags(info);
+            if flags & CAMEL_MESSAGE_DELETED != 0 {
+                return None;
+            }
+            Some((
+                flags,
+                cstr_to_string(camel_message_info_get_subject(info)),
+                cstr_to_string(camel_message_info_get_from(info)),
+                cstr_to_string(camel_message_info_get_preview(info)),
+                camel_message_info_get_date_sent(info),
+                camel_message_info_get_date_received(info),
+            ))
+        })
+    }?;
+    let subject = subject
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_default();
-    let from = cstr_to_string(unsafe { camel_message_info_get_from(info) })
+    let from = from
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_default();
     let participants = if from.is_empty() {
@@ -2185,16 +1803,11 @@ unsafe fn conversation_from_message_info(
     } else {
         vec![compact_participant(&from)]
     };
-    let preview = cstr_to_string(unsafe { camel_message_info_get_preview(info) })
-        .unwrap_or_default()
-        .trim()
-        .to_string();
-    let sent = unsafe { camel_message_info_get_date_sent(info) };
-    let received = unsafe { camel_message_info_get_date_received(info) };
-    let timestamp_secs = if sent > 0 { sent } else { received.max(0) };
+    let preview = preview.unwrap_or_default().trim().to_string();
+    let timestamp_secs = message_timestamp(sent, received);
 
-    ConversationSummary {
-        id: ConversationId(compose_conversation_id(folder_name, &uid)),
+    Some(ConversationSummary {
+        id: ConversationId(compose_conversation_id(folder_name, uid)),
         folder_id: FolderId(folder_name.into()),
         subject,
         participants,
@@ -2212,214 +1825,15 @@ unsafe fn conversation_from_message_info(
         starred: flags & CAMEL_MESSAGE_FLAGGED != 0,
         last_updated_unix_ms: timestamp_secs.saturating_mul(1000),
         preview,
-    }
-}
-
-unsafe fn build_message_detail(
-    uid: &str,
-    conversation_id: &ConversationId,
-    message_info: *mut CamelMessageInfo,
-    message: *mut CamelMimeMessage,
-) -> Result<MessageDetail> {
-    debug_assert!(!message.is_null());
-    debug_assert!(!message_info.is_null());
-    let info_flags = unsafe { camel_message_info_get_flags(message_info) };
-    let info_subject = cstr_to_string(unsafe { camel_message_info_get_subject(message_info) });
-    let info_from = cstr_to_string(unsafe { camel_message_info_get_from(message_info) });
-    let subject = cstr_to_string(unsafe { camel_mime_message_get_subject(message) })
-        .filter(|value| !value.trim().is_empty())
-        .or(info_subject)
-        .unwrap_or_default();
-    let from = unsafe { first_address_string(camel_mime_message_get_from(message)) }
-        .or(info_from)
-        .unwrap_or_default();
-    let reply_to = unsafe { first_address_string(camel_mime_message_get_reply_to(message)) };
-    let to = unsafe {
-        address_list_strings(camel_mime_message_get_recipients(
-            message,
-            CAMEL_RECIPIENT_TYPE_TO.as_ptr().cast(),
-        ))
-    };
-    let cc = unsafe {
-        address_list_strings(camel_mime_message_get_recipients(
-            message,
-            CAMEL_RECIPIENT_TYPE_CC.as_ptr().cast(),
-        ))
-    };
-    let bcc = unsafe {
-        address_list_strings(camel_mime_message_get_recipients(
-            message,
-            CAMEL_RECIPIENT_TYPE_BCC.as_ptr().cast(),
-        ))
-    };
-    let message_id = cstr_to_string(unsafe { camel_mime_message_get_message_id(message) })
-        .unwrap_or_else(|| uid.to_string());
-    let (body_html, body_text) = unsafe { extract_message_bodies(message) };
-    let body_html = body_html.unwrap_or_default();
-    let body_text = body_text.unwrap_or_default();
-    let attachments = unsafe { extract_message_attachments(message) }?;
-    let mut offset = 0;
-    let date_sent = unsafe { camel_mime_message_get_date(message, &mut offset) };
-    let date_received = unsafe { camel_mime_message_get_date_received(message, &mut offset) };
-    let date_secs = choose_message_timestamp(date_sent, date_received);
-
-    tracing::debug!(
-        target: "pigeon::eds",
-        body_html_len = body_html.len(),
-        body_text_len = body_text.len(),
-        has_attachment = !attachments.is_empty(),
-        "loaded message detail"
-    );
-    development_probe_log!(
-        "message detail: conversation={} body_html_len={} body_text_len={} attachments={}",
-        conversation_id.0,
-        body_html.len(),
-        body_text.len(),
-        attachments.len()
-    );
-
-    Ok(MessageDetail {
-        message_id: MessageId(message_id),
-        conversation_id: conversation_id.clone(),
-        subject,
-        from,
-        to,
-        cc,
-        bcc,
-        reply_to,
-        date_unix_secs: date_secs,
-        starred: (info_flags & CAMEL_MESSAGE_FLAGGED) != 0,
-        unread: (info_flags & CAMEL_MESSAGE_SEEN) == 0,
-        attachments,
-        body: MessageBody::from_parts(body_html, body_text),
     })
-}
-
-unsafe fn load_folder_tree(store: *mut CamelStore) -> Result<Vec<MailFolder>> {
-    let mut error = ptr::null_mut();
-    let info = unsafe {
-        camel_store_get_folder_info_sync(
-            store,
-            ptr::null(),
-            CAMEL_STORE_FOLDER_INFO_RECURSIVE
-                | CAMEL_STORE_FOLDER_INFO_SUBSCRIBED
-                | CAMEL_STORE_FOLDER_INFO_NO_VIRTUAL,
-            ptr::null_mut(),
-            &mut error,
-        )
-    };
-    let Some(info) = (unsafe { OwnedFolderInfo::from_ptr(info) }) else {
-        return match take_gerror(error) {
-            Some(error) => {
-                Err(error)
-            }
-            None => {
-                Ok(Vec::new())
-            }
-        };
-    };
-
-    let mut folders = Vec::new();
-    collect_folder_info(info.as_ptr(), &mut folders)?;
-
-    folders.sort_by(compare_folders);
-    folders.dedup_by(|left, right| left.id == right.id);
-    Ok(folders)
-}
-
-fn collect_folder_info(
-    info: *mut CamelFolderInfo,
-    folders: &mut Vec<MailFolder>,
-) -> Result<()> {
-    let mut cursor = info;
-    while !cursor.is_null() {
-        let full_name = unsafe { cstr_to_string((*cursor).full_name) }
-            .filter(|name| !name.is_empty())
-            .ok_or_else(|| anyhow!("Camel folder info has no full name"))?;
-        let display_name = unsafe { cstr_to_string((*cursor).display_name) };
-        let folder_name = display_name.unwrap_or_else(|| full_name.clone());
-        folders.push(MailFolder {
-            id: FolderId(full_name),
-            name: folder_name,
-            unread_count: unsafe { (*cursor).unread.max(0) as u32 },
-            kind: classify_folder_kind(unsafe { (*cursor).flags }),
-        });
-
-        let child = unsafe { (*cursor).child };
-        if !child.is_null() {
-            collect_folder_info(child, folders)?;
-        }
-        cursor = unsafe { (*cursor).next };
-    }
-    Ok(())
-}
-
-fn classify_folder_kind(flags: c_uint) -> FolderKind {
-    match flags & CAMEL_FOLDER_TYPE_MASK {
-        CAMEL_FOLDER_TYPE_INBOX => {
-            FolderKind::Inbox
-        }
-        CAMEL_FOLDER_TYPE_OUTBOX => {
-            FolderKind::Outbox
-        }
-        CAMEL_FOLDER_TYPE_DRAFTS => {
-            FolderKind::Drafts
-        }
-        CAMEL_FOLDER_TYPE_SENT => {
-            FolderKind::Sent
-        }
-        CAMEL_FOLDER_TYPE_ARCHIVE => {
-            FolderKind::Archive
-        }
-        CAMEL_FOLDER_TYPE_TRASH => {
-            FolderKind::Trash
-        }
-        CAMEL_FOLDER_TYPE_JUNK => {
-            FolderKind::Spam
-        }
-        _ => {
-            FolderKind::Custom
-        }
-    }
-}
-
-fn compare_folders(left: &MailFolder, right: &MailFolder) -> Ordering {
-    folder_rank(left.kind)
-        .cmp(&folder_rank(right.kind))
-        .then_with(|| left.name.cmp(&right.name))
-}
-
-fn folder_rank(kind: FolderKind) -> usize {
-    match kind {
-        FolderKind::Inbox => {
-            0
-        }
-        FolderKind::Drafts => {
-            1
-        }
-        FolderKind::Outbox => {
-            2
-        }
-        FolderKind::Sent => {
-            3
-        }
-        FolderKind::Archive => {
-            4
-        }
-        FolderKind::Trash => {
-            5
-        }
-        FolderKind::Spam => {
-            6
-        }
-        FolderKind::Custom => {
-            7
-        }
-    }
 }
 
 fn compose_conversation_id(folder_name: &str, uid: &str) -> String {
     format!("{folder_name}{CONVERSATION_ID_SEPARATOR}{uid}")
+}
+
+fn message_timestamp(sent: i64, received: i64) -> i64 {
+    if sent > 0 { sent } else { received.max(0) }
 }
 
 pub(crate) fn conversation_id_parts(value: &str) -> Option<(&str, &str)> {
@@ -2452,155 +1866,6 @@ fn cstr_to_string(value: *const c_char) -> Option<String> {
             .to_string_lossy()
             .into_owned(),
     )
-}
-
-/// Uses the same MIME address decoder as ESourceMailIdentity's alias-set API.
-pub(super) fn decode_addresses(raw: &str) -> Result<Vec<(String, Option<String>)>> {
-    let raw = CString::new(raw).map_err(|_| anyhow!("address list contains interior NUL"))?;
-    let addresses = unsafe { camel_internet_address_new() };
-    let owner: glib::Object = unsafe {
-        glib::translate::from_glib_full(addresses as *mut glib::gobject_ffi::GObject)
-    };
-    let count = unsafe { camel_address_decode(addresses.cast(), raw.as_ptr()) };
-    let mut result = Vec::new();
-    for index in 0..count {
-        let mut name = ptr::null();
-        let mut address = ptr::null();
-        if unsafe { camel_internet_address_get(addresses, index, &mut name, &mut address) } == 0 {
-            continue;
-        }
-        if let Some(address) = cstr_to_string(address).filter(|address| !address.is_empty()) {
-            result.push((
-                address,
-                cstr_to_string(name).filter(|name| !name.trim().is_empty()),
-            ));
-        }
-    }
-    drop(owner);
-    Ok(result)
-}
-
-unsafe fn first_address_string(addresses: *mut CamelInternetAddress) -> Option<String> {
-    let values = unsafe { address_list_strings(addresses) };
-    values.into_iter().next()
-}
-
-unsafe fn address_list_strings(addresses: *mut CamelInternetAddress) -> Vec<String> {
-    if addresses.is_null() {
-        return Vec::new();
-    }
-
-    let mut result = Vec::new();
-    let mut index = 0;
-    loop {
-        let mut name_ptr: *const c_char = ptr::null();
-        let mut email_ptr: *const c_char = ptr::null();
-        let ok =
-            unsafe { camel_internet_address_get(addresses, index, &mut name_ptr, &mut email_ptr) };
-        if ok == 0 {
-            break;
-        }
-
-        let name = cstr_to_string(name_ptr).unwrap_or_default();
-        let email = cstr_to_string(email_ptr).unwrap_or_default();
-        let value = match (name.trim(), email.trim()) {
-            ("", "") => {
-                None
-            }
-            ("", email) => {
-                Some(email.to_string())
-            }
-            (name, "") => {
-                Some(name.to_string())
-            }
-            (name, email) => {
-                Some(format!("{name} <{email}>"))
-            }
-        };
-        if let Some(value) = value {
-            result.push(value);
-        }
-
-        index += 1;
-    }
-
-    result
-}
-
-unsafe fn extract_message_bodies(
-    message: *mut CamelMimeMessage,
-) -> (Option<String>, Option<String>) {
-    let mut html_ptr: *mut c_char = ptr::null_mut();
-    let mut plain_ptr: *mut c_char = ptr::null_mut();
-
-    let ok =
-        unsafe { mail_bridge_eds_extract_message_bodies(message, &mut html_ptr, &mut plain_ptr) };
-    let html = unsafe { OwnedGlibString::from_ptr(html_ptr) };
-    let plain = unsafe { OwnedGlibString::from_ptr(plain_ptr) };
-    if ok == 0 {
-        return (None, None);
-    }
-
-    (
-        html.as_ref().map(OwnedGlibString::to_string_lossy),
-        plain.as_ref().map(OwnedGlibString::to_string_lossy),
-    )
-}
-
-unsafe fn extract_message_attachments(
-    message: *mut CamelMimeMessage,
-) -> Result<Vec<AttachmentInfo>> {
-    let Some(serialized) = (unsafe {
-        OwnedGlibString::from_ptr(mail_bridge_eds_extract_message_attachments(message))
-    }) else {
-        return Ok(Vec::new());
-    };
-    let serialized = unsafe { CStr::from_ptr(serialized.as_ptr()) }
-        .to_str()
-        .map_err(|_| anyhow!("attachment records are not UTF-8"))?;
-
-    parse_attachment_records(serialized)
-}
-
-fn parse_attachment_records(serialized: &str) -> Result<Vec<AttachmentInfo>> {
-    if serialized.is_empty() {
-        return Err(anyhow!("attachment records are empty"));
-    }
-    serialized
-        .lines()
-        .map(|line| {
-            let (display_name, token) = line
-                .split_once('\t')
-                .ok_or_else(|| anyhow!("attachment record has no token separator"))?;
-            let display_name = percent_decode_str(display_name)
-                .decode_utf8()
-                .map_err(|_| anyhow!("attachment display name is not UTF-8"))?;
-            let index = token
-                .parse::<u32>()
-                .map_err(|_| anyhow!("attachment record has an invalid token"))?;
-            if display_name.is_empty() || index == 0 {
-                return Err(anyhow!("attachment record is incomplete"));
-            }
-            Ok(AttachmentInfo {
-                display_name: display_name.into_owned(),
-                location: AttachmentLocation::CachedToken(token.to_string()),
-            })
-        })
-        .collect()
-}
-
-unsafe fn service_user_cache_dir(service: *mut CamelService) -> Option<String> {
-    cstr_to_string(unsafe { camel_service_get_user_cache_dir(service) })
-}
-
-fn choose_message_timestamp(primary: i64, secondary: i64) -> i64 {
-    if primary > 0 {
-        primary
-    } else if secondary > 0 {
-        secondary
-    } else {
-        0
-    }
 }
 
 #[cfg(debug_assertions)]
@@ -2637,9 +1902,42 @@ fn local_folder_path_prefixes(folder_path: &str) -> Result<Vec<&str>> {
 #[cfg(test)]
 mod tests {
     use super::{
-        local_folder_path_prefixes, parse_attachment_records, search_expression,
-        serialize_attachment_uris, serialize_recipients,
+        CAMEL_MESSAGE_DELETED, CAMEL_MESSAGE_FLAGGED, CamelFolderSummary, CamelMessageInfo,
+        OwnedGObject, conversation_from_message_info, local_folder_path_prefixes, search_expression,
     };
+
+    unsafe extern "C" {
+        fn camel_message_info_new(summary: *mut CamelFolderSummary) -> *mut CamelMessageInfo;
+        fn camel_message_info_set_flags(
+            info: *mut CamelMessageInfo,
+            mask: u32,
+            set: u32,
+        ) -> glib::ffi::gboolean;
+    }
+
+    #[test]
+    fn deleted_camel_records_are_excluded_from_the_visible_projection() {
+        let info = unsafe {
+            OwnedGObject::from_ptr(camel_message_info_new(std::ptr::null_mut())).unwrap()
+        };
+        let read = || unsafe { conversation_from_message_info(info.as_ptr(), "Drafts", "1") };
+        unsafe {
+            camel_message_info_set_flags(
+                info.as_ptr(),
+                CAMEL_MESSAGE_FLAGGED,
+                CAMEL_MESSAGE_FLAGGED,
+            );
+        }
+        assert!(read().unwrap().starred);
+        unsafe {
+            camel_message_info_set_flags(
+                info.as_ptr(),
+                CAMEL_MESSAGE_DELETED,
+                CAMEL_MESSAGE_DELETED,
+            );
+        }
+        assert!(read().is_none());
+    }
 
     #[test]
     fn nested_local_folder_creation_includes_each_parent() {
@@ -2675,58 +1973,6 @@ mod tests {
                 local_folder_path_prefixes(path).is_err(),
                 "accepted {path:?}"
             );
-        }
-    }
-
-    #[test]
-    fn attachment_uris_preserve_order_and_skip_empty_values() {
-        let serialized = serialize_attachment_uris(&[
-            "file:///tmp/first.txt".into(),
-            "  ".into(),
-            "file:///tmp/second.bin".into(),
-        ])
-        .unwrap();
-        assert_eq!(
-            serialized.to_str().unwrap(),
-            "file:///tmp/first.txt\nfile:///tmp/second.bin"
-        );
-    }
-
-    #[test]
-    fn attachment_uri_line_breaks_cannot_corrupt_the_wire_format() {
-        assert!(serialize_attachment_uris(&["file:///tmp/a\nb".into()]).is_err());
-        assert!(serialize_attachment_uris(&["file:///tmp/a\rb".into()]).is_err());
-    }
-
-    #[test]
-    fn recipient_line_breaks_cannot_create_extra_address_records() {
-        assert!(
-            serialize_recipients(&["person@example.com\nBcc: hidden@example.com".into()])
-                .is_err()
-        );
-        assert!(
-            serialize_recipients(&["person@example.com\rhidden@example.com".into()]).is_err()
-        );
-    }
-
-    #[test]
-    fn attachment_records_preserve_delimiters_and_duplicate_display_names() {
-        let records = parse_attachment_records(
-            "same%09name%0A100%25.txt\t1\nsame%09name%0A100%25.txt\t2",
-        )
-        .unwrap();
-
-        assert_eq!(records.len(), 2);
-        assert_eq!(records[0].display_name, "same\tname\n100%.txt");
-        assert_eq!(records[1].display_name, records[0].display_name);
-        assert_eq!(records[0].location.cached_token(), Some("1"));
-        assert_eq!(records[1].location.cached_token(), Some("2"));
-    }
-
-    #[test]
-    fn malformed_attachment_records_fail_at_the_camel_boundary() {
-        for records in ["", "name", "name\t0", "name\tnot-a-token", "%FF\t1"] {
-            assert!(parse_attachment_records(records).is_err());
         }
     }
 

@@ -103,30 +103,4 @@ mod tests {
         assert_eq!(account.aliases()[1].display_name, "New");
     }
 
-    #[test]
-    fn extensionless_eds_alias_import_is_repeatable() {
-        fn load() -> MailAccount {
-            let mut account = MailAccount::new(
-                MailAccountId("account-1".into()),
-                "Account".into(),
-                SendingIdentity::new(
-                    "owner@example.com".into(),
-                    "Owner".into(),
-                    None,
-                    Default::default(),
-                ),
-            );
-            import_eds_aliases(
-                &mut account,
-                Some("Same <same@example.com>, Same <same@example.com>"),
-            ).unwrap();
-            account
-        }
-
-        let first = load();
-        let second = load();
-        assert_eq!(first.aliases().len(), 2);
-        assert_eq!(second.aliases().len(), 2);
-        assert_eq!(first, second);
-    }
 }

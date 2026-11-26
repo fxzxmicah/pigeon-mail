@@ -60,6 +60,9 @@ msgstr "添付ファイルを利用できません。"
 msgid "Attachments"
 msgstr "添付ファイル"
 
+msgid "Attachments not added."
+msgstr "添付ファイルは追加されませんでした。"
+
 msgid "Authentication failed"
 msgstr "認証に失敗しました"
 

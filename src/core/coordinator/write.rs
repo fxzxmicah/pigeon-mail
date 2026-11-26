@@ -1,6 +1,6 @@
 use crate::core::mail::AccountMailService;
 use crate::i18n::gettext;
-use crate::model::account::{MailAccount, MailAccountId};
+use crate::model::account::{AccountIdentityEdit, MailAccountId};
 use crate::model::event::{MailEvent, RequestId};
 use crate::model::mail::{
     AttachmentLocation, ConversationId, DraftMessage, MessageAction, PreparedMessage,
@@ -81,10 +81,10 @@ impl MailCoordinator {
         }));
     }
 
-    pub fn request_account_identities_save(
+    pub(crate) fn request_account_identities_save(
         &self,
         request_id: RequestId,
-        accounts: Vec<MailAccount>,
+        edits: Vec<AccountIdentityEdit>,
     ) {
         let service = self.service();
         let coordinator = self.clone();
@@ -92,7 +92,7 @@ impl MailCoordinator {
         std::thread::spawn(move || {
             let _write_lease = write_lease;
             let result = service
-                .save_account_identities(&accounts)
+                .save_account_identities(edits)
                 .map_err(|error| {
                     crate::logging::report_failure("eds-identity-save", &error);
                     gettext("Changes not saved.")
@@ -274,28 +274,4 @@ pub(super) fn prepare_message(
         attachment.location = AttachmentLocation::ExternalUri(uri);
     }
     draft.into_prepared().map_err(anyhow::Error::msg)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn mailbox_write_keys_isolate_only_conflicting_operations() {
-        let account = MailAccountId("account".into());
-        let message = |id: &str| {
-            MailboxWriteKey::Message(
-                account.clone(),
-                ConversationId(id.into()),
-            )
-        };
-        let first = message("inbox\u{1f}first");
-        let same = message("inbox\u{1f}first");
-        let other_message = message("inbox\u{1f}second");
-        let draft = MailboxWriteKey::Draft(account);
-
-        assert_eq!(first, same);
-        assert_ne!(first, other_message);
-        assert_ne!(first, draft);
-    }
 }

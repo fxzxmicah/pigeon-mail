@@ -11,7 +11,9 @@ use crate::integration::registry::{
     IdentityExtension, IdentityExtensionState, IdentityMetadata, IdentityRegistry, MailTriplet,
     SignatureMetadata, SignatureSources, Snapshot, Source,
 };
-use crate::model::account::{MailAccount, MailAccountId, SendingIdentity, Signature};
+use crate::model::account::{
+    AccountIdentityEdit, MailAccount, MailAccountId, SendingIdentity, Signature,
+};
 use crate::model::address::normalized_mailbox_address;
 
 pub(crate) struct AccountCatalog {
@@ -421,20 +423,39 @@ struct IdentityWrite {
     primary_address: String,
 }
 
-pub(crate) fn save_identities(accounts: &[MailAccount]) -> anyhow::Result<()> {
-    let accounts = accounts
-        .iter()
-        .filter(|account| !crate::integration::stub::is_stub_account_id(&account.id))
+fn validate_identity_edit(
+    edit: &AccountIdentityEdit,
+    catalog: &[MailAccount],
+) -> anyhow::Result<()> {
+    let id = &edit.desired.id;
+    anyhow::ensure!(edit.baseline.id == *id, "identity edit targets two different accounts");
+    let current = catalog.iter()
+        .find(|account| &account.id == id)
+        .ok_or_else(|| anyhow!("mail account '{}' is absent from EDS", id.0))?;
+    anyhow::ensure!(
+        *current == edit.baseline || *current == edit.desired,
+        "EDS identity settings for account '{}' changed before save",
+        id.0
+    );
+    Ok(())
+}
+
+pub(crate) fn save_identities(edits: Vec<AccountIdentityEdit>) -> anyhow::Result<()> {
+    let edits = edits
+        .into_iter()
+        .filter(|edit| !crate::integration::stub::is_stub_account_id(&edit.desired.id))
         .collect::<Vec<_>>();
-    if accounts.is_empty() {
+    if edits.is_empty() {
         return Ok(());
     }
 
     let registry = IdentityRegistry::load()?;
     let catalog = from_registry(registry.snapshot())?;
-    let writes = accounts
+    let writes = edits
         .into_iter()
-        .map(|account| {
+        .map(|edit| {
+            validate_identity_edit(&edit, &catalog.accounts)?;
+            let account = edit.desired;
             let binding = catalog
                 .bindings
                 .iter()
@@ -448,7 +469,7 @@ pub(crate) fn save_identities(accounts: &[MailAccount]) -> anyhow::Result<()> {
                 .find(|identity| identity.uid == binding.identity_uid)
                 .ok_or_else(|| anyhow!("EDS identity '{}' disappeared", binding.identity_uid))?;
             let stored = StoredIdentityRecord::from_source(stored_identity);
-            let desired = DesiredIdentityRecord::from_account(account, stored.extension.as_ref());
+            let desired = DesiredIdentityRecord::from_account(&account, stored.extension.as_ref());
             Ok((
                 stored,
                 IdentityWrite {
@@ -507,12 +528,40 @@ fn serialize_identity_aliases(account: &MailAccount) -> Option<String> {
 mod tests {
     use super::{
         apply_identity_extension, from_registry, serialize_identity_aliases, signature_source,
+        validate_identity_edit,
     };
     use crate::integration::registry::{
         IdentityExtension, IdentityExtensionState, IdentityMetadata, MailTriplet, SignatureMetadata,
         SignatureSources, Snapshot, Source,
     };
-    use crate::model::account::{MailAccount, MailAccountId, SendingIdentity};
+    use crate::model::account::{AccountIdentityEdit, MailAccount, MailAccountId, SendingIdentity};
+
+    #[test]
+    fn identity_save_rejects_a_catalog_that_changed_since_editing() {
+        let baseline = MailAccount::new(
+            MailAccountId("account".into()),
+            "Original".into(),
+            SendingIdentity::new(
+                "owner@example.com".into(),
+                "Owner".into(),
+                None,
+                Default::default(),
+            ),
+        );
+        let mut desired = baseline.clone();
+        assert!(desired.rename("Local edit".into()));
+        let mut external = baseline.clone();
+        assert!(external.add_identity(SendingIdentity::new(
+            "external@example.com".into(),
+            "External alias".into(),
+            None,
+            Default::default(),
+        )));
+        let edit = AccountIdentityEdit { baseline, desired };
+        assert!(validate_identity_edit(&edit, std::slice::from_ref(&edit.baseline)).is_ok());
+        assert!(validate_identity_edit(&edit, std::slice::from_ref(&edit.desired)).is_ok());
+        assert!(validate_identity_edit(&edit, &[external]).is_err());
+    }
 
     fn metadata(address: &str, reply_to: &str) -> IdentityMetadata {
         IdentityMetadata {

@@ -12,7 +12,7 @@ use crate::model::account::{MailAccount, MailAccountId, SendingIdentity};
 use crate::model::address::{normalized_mailbox_address, split_mailbox_list};
 use crate::model::mail::{
     AttachmentInfo, AttachmentLocation, AttachmentOperation, AttachmentSource, DraftMessage,
-    MailtoRequest, TextRange,
+    MailtoRequest, StoredMessageRef, TextRange,
 };
 use crate::ui::attachment;
 
@@ -37,6 +37,7 @@ enum ComposeOperation {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ComposeActivity {
     Idle,
+    ChoosingAttachments,
     ConvertingBody,
     PreparingWrite(ComposeOperation),
     Writing(ComposeOperation),
@@ -196,7 +197,27 @@ impl ComposeViewModel {
         }
     }
 
-    pub fn saved_status(&self) -> String {
+    fn accept_saved_draft(&mut self, stored: Option<StoredMessageRef>) {
+        let draft = &mut self.draft;
+        if let Some(stored) = stored {
+            debug_assert_eq!(draft.attachments.len(), stored.attachment_tokens.len());
+            for (attachment, token) in draft.attachments.iter_mut().zip(stored.attachment_tokens) {
+                if matches!(attachment.location, AttachmentLocation::CachedToken(_)) {
+                    attachment.location = AttachmentLocation::CachedToken(token);
+                }
+            }
+            let source = draft.has_cached_attachments().then(|| AttachmentSource {
+                account_id: draft.account_id.clone(),
+                conversation_id: stored.conversation_id.clone(),
+            });
+            draft.set_attachment_source(source);
+            draft.conversation_id = Some(stored.conversation_id);
+            draft.message_id = Some(stored.message_id);
+        }
+        self.dirty = false;
+    }
+
+    fn saved_status(&self) -> String {
         match self.kind {
             ComposeKind::New | ComposeKind::EditDraft => {
                 gettext("Draft saved")
@@ -490,11 +511,11 @@ impl ComposePage {
         let page = self.clone();
         self.inner
             .save_button
-            .connect_clicked(move |_| page.start_save());
+            .connect_clicked(move |_| page.start_operation(ComposeOperation::SaveDraft));
         let page = self.clone();
         self.inner
             .send_button
-            .connect_clicked(move |_| page.start_send());
+            .connect_clicked(move |_| page.start_operation(ComposeOperation::Send));
         for entry in [
             self.inner.to_entry.clone(),
             self.inner.cc_entry.clone(),
@@ -817,53 +838,45 @@ impl ComposePage {
         self.set_busy(true);
         let page = self.clone();
         self.inner.composer.capture_content(move |snapshot| {
-            page.inner.activity.set(ComposeActivity::Idle);
-            let Ok(snapshot) = snapshot else {
-                page.inner
-                    .toast_overlay
-                    .add_toast(adw::Toast::new(&gettext("Message not converted")));
-                page.finish_account_rebind_or_enable();
-                page.request_next_navigation();
-                return;
-            };
-            if html_active {
-                let (text, signature_range) = page.text_with_preserved_signature(&snapshot);
-                let changed = page.text_body() != text;
-                page.inner.updating_widgets.set(true);
-                page.set_text_body(&text, signature_range);
-                {
-                    let mut current = page.inner.model.borrow_mut();
-                    if let Some(model) = current.as_mut() {
-                        model.draft.body.replace(snapshot.html, text, signature_range);
-                    }
+            match snapshot {
+                Ok(content) => {
+                    page.apply_body_conversion(content, html_active);
                 }
-                page.inner.body_stack.set_visible_child_name("text");
-                page.inner.updating_widgets.set(false);
-                if changed {
-                    page.mark_modified();
-                }
-            } else {
-                let text = page.text_body();
-                let html = page.html_from_text_editor(&snapshot);
-                let changed = snapshot.html != html;
-                let signature_range = page.signature_text_range();
-                page.inner.updating_widgets.set(true);
-                page.inner.composer.set_content(&html, &text);
-                {
-                    let mut current = page.inner.model.borrow_mut();
-                    if let Some(model) = current.as_mut() {
-                        model.draft.body.replace(html, text, signature_range);
-                    }
-                }
-                page.inner.body_stack.set_visible_child_name("html");
-                page.inner.updating_widgets.set(false);
-                if changed {
-                    page.mark_modified();
+                Err(()) => {
+                    page.inner
+                        .toast_overlay
+                        .add_toast(adw::Toast::new(&gettext("Message not converted")));
                 }
             }
-            page.finish_account_rebind_or_enable();
-            page.request_next_navigation();
+            page.finish_activity();
         });
+    }
+
+    fn apply_body_conversion(&self, content: ComposerContent, html_active: bool) {
+        let (html, text, signature_range, target, changed) = if html_active {
+            let (text, signature_range) = self.text_with_preserved_signature(&content);
+            let changed = self.text_body() != text;
+            (content.html, text, signature_range, "text", changed)
+        } else {
+            let text = self.text_body();
+            let html = self.html_from_text_editor(&content);
+            let changed = content.html != html;
+            (html, text, self.signature_text_range(), "html", changed)
+        };
+        self.inner.updating_widgets.set(true);
+        if html_active {
+            self.set_text_body(&text, signature_range);
+        } else {
+            self.inner.composer.set_content(&html, &text);
+        }
+        if let Some(model) = self.inner.model.borrow_mut().as_mut() {
+            model.draft.body.replace(html, text, signature_range);
+        }
+        self.inner.body_stack.set_visible_child_name(target);
+        self.inner.updating_widgets.set(false);
+        if changed {
+            self.mark_modified();
+        }
     }
 
     fn identity_changed(&self, selected: u32) {
@@ -993,7 +1006,7 @@ impl ComposePage {
         self.inner.identity_dropdown.set_selected(selected);
     }
 
-    fn begin_operation(&self, operation: ComposeOperation) {
+    fn start_operation(&self, operation: ComposeOperation) {
         assert_eq!(
             self.inner.activity.get(),
             ComposeActivity::Idle,
@@ -1004,18 +1017,6 @@ impl ComposePage {
             .set(ComposeActivity::PreparingWrite(operation));
         self.set_busy(true);
         self.inner.title.set_subtitle(&operation.progress_status());
-    }
-
-    fn start_save(&self) {
-        self.start_operation(ComposeOperation::SaveDraft);
-    }
-
-    fn start_send(&self) {
-        self.start_operation(ComposeOperation::Send);
-    }
-
-    fn start_operation(&self, operation: ComposeOperation) {
-        self.begin_operation(operation);
         let text = self.text_body();
         let signature_range = self.signature_text_range();
         let page = self.clone();
@@ -1068,10 +1069,7 @@ impl ComposePage {
         }
     }
 
-    pub fn finish_save(
-        &self,
-        result: Result<Option<crate::model::mail::StoredMessageRef>, String>,
-    ) {
+    pub fn finish_save(&self, result: Result<Option<StoredMessageRef>, String>) {
         assert_eq!(
             self.inner.activity.get(),
             ComposeActivity::Writing(ComposeOperation::SaveDraft),
@@ -1079,31 +1077,16 @@ impl ComposePage {
         );
         match result {
             Ok(stored) => {
-                self.inner.activity.set(ComposeActivity::Idle);
                 let saved_status = {
                     let mut current = self.inner.model.borrow_mut();
                     let model = current
                         .as_mut()
                         .expect("a completed compose operation must still own its draft");
-                    let draft = &mut model.draft;
-                    if let Some(stored) = stored {
-                        if draft.has_cached_attachments() {
-                            draft.set_attachment_source(Some(AttachmentSource {
-                                account_id: draft.account_id.clone(),
-                                conversation_id: stored.conversation_id.clone(),
-                            }));
-                        } else {
-                            draft.set_attachment_source(None);
-                        }
-                        draft.conversation_id = Some(stored.conversation_id);
-                        draft.message_id = Some(stored.message_id);
-                    }
-                    model.dirty = false;
+                    model.accept_saved_draft(stored);
                     model.saved_status()
                 };
                 self.inner.title.set_subtitle(&saved_status);
-                self.finish_account_rebind_or_enable();
-                self.request_next_navigation();
+                self.finish_activity();
             }
             Err(error) => {
                 self.finish_operation_failure(
@@ -1121,8 +1104,7 @@ impl ComposePage {
             "send completion does not match the active operation"
         );
         match result {
-            Ok(_) => {
-                self.inner.activity.set(ComposeActivity::Idle);
+            Ok(()) => {
                 self.inner.model.borrow_mut().as_mut()
                     .expect("a completed send retains its compose model")
                     .dirty = false;
@@ -1133,8 +1115,7 @@ impl ComposePage {
                         queue.push_back(NavigationRequest::Mailbox(None));
                     }
                 }
-                self.finish_account_rebind_or_enable();
-                self.request_next_navigation();
+                self.finish_activity();
             }
             Err(error) => {
                 self.finish_operation_failure(ComposeOperation::Send.failure_status(), error)
@@ -1143,18 +1124,13 @@ impl ComposePage {
     }
 
     fn finish_operation_failure(&self, status: String, error: String) {
-        self.inner.activity.set(ComposeActivity::Idle);
         self.inner.title.set_subtitle(&status);
         self.inner.toast_overlay.add_toast(adw::Toast::new(&error));
-        self.resume_navigation_after_failure();
+        self.finish_activity();
     }
 
-    fn resume_navigation_after_failure(&self) {
-        self.finish_account_rebind_or_enable();
-        self.request_next_navigation();
-    }
-
-    fn finish_account_rebind_or_enable(&self) {
+    fn finish_activity(&self) {
+        self.inner.activity.set(ComposeActivity::Idle);
         if self.inner.account_rebind_pending.get() {
             let activation_finished = !self.inner.mailbox.borrow().is_loading();
             if activation_finished {
@@ -1163,21 +1139,22 @@ impl ComposePage {
         } else {
             self.set_busy(false);
         }
+        self.request_next_navigation();
     }
 
     fn set_busy(&self, busy: bool) {
         self.inner.root.set_sensitive(!busy);
         self.inner.back_button.set_sensitive(!busy);
-        let write_available = !busy && self.write_available();
+        let write_available = !busy && self.inner.model.borrow().is_some();
         self.inner.save_button.set_sensitive(write_available);
         self.inner.send_button.set_sensitive(write_available);
     }
 
-    fn write_available(&self) -> bool {
-        self.inner.model.borrow().is_some()
-    }
-
     fn add_attachments(&self) {
+        if self.inner.activity.get() != ComposeActivity::Idle {
+            return;
+        }
+        self.inner.activity.set(ComposeActivity::ChoosingAttachments);
         let dialog = gtk::FileDialog::builder()
             .title(gettext("Add attachments"))
             .accept_label(gettext("Attach"))
@@ -1187,45 +1164,46 @@ impl ComposePage {
             Some(&self.inner.parent),
             None::<&gio::Cancellable>,
             move |result| {
-                let Ok(files) = result else {
-                    return;
-                };
-                let attachments = (0..files.n_items())
-                    .filter_map(|index| files.item(index))
-                    .filter_map(|item| item.downcast::<gio::File>().ok())
-                    .map(|file| AttachmentInfo {
-                        display_name: file
-                            .basename()
-                            .map(|name| name.to_string_lossy().into_owned())
-                            .filter(|name| !name.is_empty())
-                            .unwrap_or_else(|| gettext("Attachment")),
-                        location: AttachmentLocation::ExternalUri(file.uri().to_string()),
-                    })
-                    .collect::<Vec<_>>();
-                let added_index = {
-                    let mut current = page.inner.model.borrow_mut();
-                    let Some(model) = current.as_mut() else {
-                        return;
-                    };
-                    let draft = &mut model.draft;
-                    let previous_len = draft.attachments.len();
-                    for attachment in attachments {
-                        if draft.attachments.iter().any(|item| {
-                            item.location == attachment.location
-                        }) {
-                            continue;
-                        }
-                        draft.attachments.push(attachment);
-                    }
-                    (draft.attachments.len() > previous_len)
-                        .then_some(draft.attachments.len() - 1)
-                };
-                if let Some(added_index) = added_index {
-                    page.refresh_attachments(Some(added_index));
+                if let Some(files) = attachment::file_selection(
+                    result,
+                    "attachment-choose",
+                    &page.inner.toast_overlay,
+                    || gettext("Attachments not added."),
+                ) && let Some(index) = page.add_selected_files(files) {
+                    page.refresh_attachments(Some(index));
                     page.mark_modified();
                 }
+                page.finish_activity();
             },
         );
+    }
+
+    fn add_selected_files(&self, files: gio::ListModel) -> Option<usize> {
+        let attachments = (0..files.n_items())
+            .filter_map(|index| files.item(index))
+            .filter_map(|item| item.downcast::<gio::File>().ok())
+            .map(|file| AttachmentInfo {
+                display_name: file
+                    .basename()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .filter(|name| !name.is_empty())
+                    .unwrap_or_else(|| gettext("Attachment")),
+                location: AttachmentLocation::ExternalUri(file.uri().to_string()),
+            })
+            .collect::<Vec<_>>();
+        let mut current = self.inner.model.borrow_mut();
+        let draft = &mut current.as_mut()?.draft;
+        let previous_len = draft.attachments.len();
+        for attachment in attachments {
+            if !draft
+                .attachments
+                .iter()
+                .any(|item| item.location == attachment.location)
+            {
+                draft.attachments.push(attachment);
+            }
+        }
+        (draft.attachments.len() > previous_len).then(|| draft.attachments.len() - 1)
     }
 
     fn open_attachment(&self, index: usize) {
@@ -1532,10 +1510,52 @@ mod tests {
     use crate::model::event::MailboxContentSnapshot;
     use crate::model::mail::{
         AttachmentInfo, AttachmentLocation, AttachmentSource, ConversationId, MailboxMode,
-        MailtoRequest, MessageId, TextRange,
+        MailtoRequest, MessageId, StoredMessageRef, TextRange,
     };
     use crate::model::settings::AppSettings;
     use crate::ui::mailbox::MailboxViewModel;
+
+    #[test]
+    fn saved_draft_rebinds_remaining_cached_attachments_to_the_new_message() {
+        let account = stub_account();
+        let mut draft = crate::core::draft::create_draft(account.id.clone(), account.default_identity());
+        draft.attachments = vec![
+            AttachmentInfo {
+                display_name: "new.txt".into(),
+                location: AttachmentLocation::ExternalUri("file:///tmp/new.txt".into()),
+            },
+            AttachmentInfo {
+                display_name: "retained.txt".into(),
+                location: AttachmentLocation::CachedToken("4".into()),
+            },
+        ];
+        draft.set_attachment_source(Some(AttachmentSource {
+            account_id: MailAccountId("original-account".into()),
+            conversation_id: ConversationId("old-message".into()),
+        }));
+        let mut model = ComposeViewModel {
+            kind: ComposeKind::Forward,
+            draft,
+            available_identities: account.aliases().to_vec(),
+            dirty: true,
+        };
+        let conversation_id = ConversationId("local/Drafts\u{1f}new".into());
+        let message_id = MessageId("draft@example.com".into());
+        model.accept_saved_draft(Some(StoredMessageRef {
+            conversation_id: conversation_id.clone(),
+            message_id: message_id.clone(),
+            attachment_tokens: vec!["1".into(), "2".into()],
+        }));
+
+        assert_eq!(model.draft.attachments[1].location.cached_token(), Some("2"));
+        assert!(matches!(&model.draft.attachments[0].location, AttachmentLocation::ExternalUri(_)));
+        let source = model.draft.attachment_source().unwrap();
+        assert_eq!(source.account_id, account.id);
+        assert_eq!(source.conversation_id, conversation_id);
+        assert_eq!(model.draft.conversation_id, Some(conversation_id));
+        assert_eq!(model.draft.message_id, Some(message_id));
+        assert!(!model.dirty);
+    }
 
     #[test]
     fn stub_mailto_uses_the_visible_stub_identity_without_an_eds_binding() {

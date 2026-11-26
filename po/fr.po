@@ -60,6 +60,9 @@ msgstr "La pièce jointe est indisponible."
 msgid "Attachments"
 msgstr "Pièces jointes"
 
+msgid "Attachments not added."
+msgstr "Les pièces jointes n’ont pas été ajoutées."
+
 msgid "Authentication failed"
 msgstr "Échec de l’authentification"
 

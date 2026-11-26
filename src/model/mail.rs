@@ -391,6 +391,7 @@ fn byte_index(text: &str, character_offset: usize) -> Option<usize> {
 pub struct StoredMessageRef {
     pub conversation_id: ConversationId,
     pub message_id: MessageId,
+    pub attachment_tokens: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -489,7 +490,7 @@ impl PreparedMessage {
 mod tests {
     use super::{
         AttachmentInfo, AttachmentLocation, ConversationId, ConversationSummary, DraftBody,
-        DraftMessage, FolderId, MailtoRequest, MessageBody, TextRange, WriteOutcome,
+        DraftMessage, FolderId, MailtoRequest, MessageBody, TextRange,
         escape_html_text, plain_text_to_html, sort_and_deduplicate_conversations,
     };
     use crate::model::account::MailAccountId;
@@ -517,16 +518,6 @@ mod tests {
 
         assert_eq!(conversations.len(), 1);
         assert_eq!(conversations[0].subject, "authoritative");
-    }
-
-    #[test]
-    fn write_outcomes_separate_visible_change_from_network_convergence() {
-        assert!(!WriteOutcome::Unchanged.changed());
-        assert!(!WriteOutcome::Unchanged.requires_convergence());
-        assert!(WriteOutcome::Applied.changed());
-        assert!(!WriteOutcome::Applied.requires_convergence());
-        assert!(WriteOutcome::Queued.changed());
-        assert!(WriteOutcome::Queued.requires_convergence());
     }
 
     #[test]

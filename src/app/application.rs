@@ -15,7 +15,7 @@ use crate::ui::mailbox::{MailboxViewModel, MainWindow};
 struct ApplicationSession {
     runtime: AccountRuntime,
     coordinator: MailCoordinator,
-    window: RefCell<Option<MainWindow>>,
+    window: RefCell<Option<Rc<MainWindow>>>,
 }
 
 impl ApplicationSession {
@@ -28,11 +28,11 @@ impl ApplicationSession {
         }
     }
 
-    fn window(&self, app: &adw::Application) -> MainWindow {
+    fn window(&self, app: &adw::Application) -> Rc<MainWindow> {
         ensure_main_window(app, &self.window, &self.runtime, &self.coordinator)
     }
 
-    fn present(&self, app: &adw::Application) -> MainWindow {
+    fn present(&self, app: &adw::Application) -> Rc<MainWindow> {
         let window = self.window(app);
         window.present();
         window
@@ -157,10 +157,10 @@ fn parse_mailto_open_uri(uri: &str) -> anyhow::Result<MailtoRequest> {
 
 fn ensure_main_window(
     app: &adw::Application,
-    slot: &RefCell<Option<MainWindow>>,
+    slot: &RefCell<Option<Rc<MainWindow>>>,
     runtime: &AccountRuntime,
     coordinator: &MailCoordinator,
-) -> MainWindow {
+) -> Rc<MainWindow> {
     let existing_window = slot.borrow().clone();
     if let Some(window) = existing_window {
         return window;

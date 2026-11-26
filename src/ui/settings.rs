@@ -7,69 +7,17 @@ use std::rc::Rc;
 use crate::core::coordinator::MailCoordinator;
 use crate::i18n::gettext;
 use crate::integration::webkit::WebKitComposer;
-use crate::model::account::{MailAccount, SendingIdentity, Signature};
+use crate::model::account::{AccountIdentityEdit, MailAccount, SendingIdentity, Signature};
 use crate::model::event::RequestId;
 
 use super::editor::DualFormatEditor;
-use super::mailbox::MailboxViewModel;
 use state::{SettingsDraftState, SettingsViewSnapshot};
-
-type SettingsSaveCompletion = Box<dyn FnOnce(Result<(), String>)>;
 
 struct SettingsSaveRequest {
     request_id: RequestId,
-    completed: SettingsSaveCompletion,
+    submitted: Vec<AccountIdentityEdit>,
 }
 
-#[derive(Clone, Default)]
-struct SettingsSaveState {
-    active: Rc<RefCell<Option<SettingsSaveRequest>>>,
-}
-
-impl SettingsSaveState {
-    fn request(
-        &self,
-        coordinator: &MailCoordinator,
-        accounts: Vec<MailAccount>,
-        completed: impl FnOnce(Result<(), String>) + 'static,
-    ) {
-        let request_id = RequestId::next();
-        let request = SettingsSaveRequest {
-            request_id,
-            completed: Box::new(completed),
-        };
-        assert!(
-            self.active.borrow_mut().replace(request).is_none(),
-            "settings saves must be single-flight"
-        );
-        coordinator.request_account_identities_save(request_id, accounts);
-    }
-
-    fn finish(
-        &self,
-        request_id: RequestId,
-        result: Result<(), String>,
-    ) -> bool {
-        let mut active = self.active.borrow_mut();
-        let Some(save) = active.as_ref() else {
-            return false;
-        };
-        if save.request_id != request_id {
-            return false;
-        }
-        let completed = active
-            .take()
-            .expect("the matched settings save exists")
-            .completed;
-        drop(active);
-        completed(result);
-        true
-    }
-}
-
-type SharedSettingsDraftState = Rc<RefCell<SettingsDraftState>>;
-
-#[derive(Clone)]
 struct SettingsMainView {
     account: gtk::DropDown,
     name: adw::EntryRow,
@@ -77,7 +25,7 @@ struct SettingsMainView {
     edit: gtk::Button,
     remove: gtk::Button,
     set_default: gtk::Button,
-    projecting: Rc<Cell<bool>>,
+    projecting: Cell<bool>,
 }
 
 impl SettingsMainView {
@@ -143,7 +91,6 @@ impl SettingsMainView {
     }
 }
 
-#[derive(Clone)]
 struct AliasEditorView {
     page: adw::NavigationPage,
     name: adw::EntryRow,
@@ -151,9 +98,17 @@ struct AliasEditorView {
     reply_to: adw::EntryRow,
     composer: Rc<WebKitComposer>,
     text: gtk::TextView,
+    stack: adw::ViewStack,
 }
 
 impl AliasEditorView {
+    fn signature_text(&self) -> String {
+        let buffer = self.text.buffer();
+        buffer
+            .text(&buffer.start_iter(), &buffer.end_iter(), true)
+            .to_string()
+    }
+
     fn load(&self, account: &MailAccount, identity: &SendingIdentity) {
         self.name.set_text(&identity.display_name);
         self.address.set_text(&identity.address);
@@ -176,12 +131,12 @@ impl AliasEditorView {
     }
 }
 
-#[derive(Clone)]
 pub(super) struct SettingsDialog {
     inner: adw::Dialog,
-    saves: SettingsSaveState,
-    mailbox: Rc<RefCell<MailboxViewModel>>,
-    state: SharedSettingsDraftState,
+    navigation: adw::NavigationView,
+    toast: adw::ToastOverlay,
+    save: RefCell<Option<SettingsSaveRequest>>,
+    state: RefCell<SettingsDraftState>,
     main_view: SettingsMainView,
     editor_view: AliasEditorView,
 }
@@ -191,20 +146,58 @@ impl SettingsDialog {
         self.inner.present(Some(parent));
     }
 
+    fn save(&self, coordinator: &MailCoordinator) {
+        let edits = self.state.borrow().edits_to_save();
+        let Some(edits) = edits else {
+            self.toast.add_toast(adw::Toast::new(&gettext("Account name is empty.")));
+            return;
+        };
+        if edits.is_empty() {
+            return;
+        }
+        let request_id = RequestId::next();
+        let request = SettingsSaveRequest {
+            request_id,
+            submitted: edits.clone(),
+        };
+        assert!(
+            self.save.borrow_mut().replace(request).is_none(),
+            "settings saves must be single-flight"
+        );
+        self.inner.set_can_close(false);
+        self.navigation.set_sensitive(false);
+        coordinator.request_account_identities_save(request_id, edits);
+    }
+
     pub(super) fn finish_save(
         &self,
         request_id: RequestId,
-        result: Result<(), String>,
+        result: &Result<(), String>,
     ) -> bool {
-        self.saves.finish(request_id, result)
+        let mut pending = self.save.borrow_mut();
+        if !pending.as_ref().is_some_and(|save| save.request_id == request_id) {
+            return false;
+        }
+        let save = pending.take().expect("the matched settings save exists");
+        drop(pending);
+        match result {
+            Ok(()) => {
+                self.state.borrow_mut().record_saved(save.submitted);
+            }
+            Err(message) => {
+                self.toast.add_toast(adw::Toast::new(message));
+            }
+        }
+        self.inner.set_can_close(true);
+        self.navigation.set_sensitive(true);
+        true
     }
 
     pub(super) fn connect_closed(&self, closed: impl Fn() + 'static) {
         self.inner.connect_closed(move |_| closed());
     }
 
-    pub(super) fn mailbox_changed(&self) {
-        let accounts = self.mailbox.borrow().accounts().to_vec();
+    pub(super) fn update_account_catalog(&self, accounts: Vec<MailAccount>) {
         let mut state = self.state.borrow_mut();
         let editor_identity = state.rebase(accounts);
         let snapshot = state.view_snapshot();
@@ -218,18 +211,16 @@ impl SettingsDialog {
 }
 
 pub(super) fn build_settings(
-    mailbox_state: Rc<RefCell<MailboxViewModel>>,
+    accounts: Vec<MailAccount>,
+    initial_account: usize,
     coordinator: MailCoordinator,
-) -> SettingsDialog {
+) -> Rc<SettingsDialog> {
     let dialog = adw::Dialog::builder()
         .title(gettext("Mail Settings"))
         .content_width(640)
         .content_height(560)
         .build();
-    let initial = mailbox_state.borrow().selected_account_index();
-    let accounts = mailbox_state.borrow().accounts().to_vec();
-    let state = Rc::new(RefCell::new(SettingsDraftState::new(accounts, initial)));
-    let saves = SettingsSaveState::default();
+    let state = RefCell::new(SettingsDraftState::new(accounts, initial_account));
 
     let account_dropdown = gtk::DropDown::new(None::<gtk::StringList>, None::<gtk::Expression>);
     let account_name_row = adw::EntryRow::builder()
@@ -373,269 +364,235 @@ pub(super) fn build_settings(
     toast_overlay.set_child(Some(&navigation));
     dialog.set_child(Some(&toast_overlay));
 
-    let main_view = SettingsMainView {
-        account: account_dropdown.clone(),
-        name: account_name_row.clone(),
-        aliases: alias_list.clone(),
-        edit: edit_alias_button.clone(),
-        remove: remove_alias_button.clone(),
-        set_default: default_alias_button.clone(),
-        projecting: Rc::new(Cell::new(false)),
-    };
-    let editor_view = AliasEditorView {
-        page: editor_navigation_page.clone(),
-        name: name_row.clone(),
-        address: address_row.clone(),
-        reply_to: reply_to_row.clone(),
-        composer: Rc::clone(&signature_composer),
-        text: signature_text_editor.clone(),
-    };
-    {
-        let state = state.borrow();
-        let snapshot = state.view_snapshot();
-        drop(state);
-        main_view.refresh(&snapshot);
-    }
+    let settings = Rc::new(SettingsDialog {
+        inner: dialog,
+        navigation: navigation.clone(),
+        toast: toast_overlay,
+        save: RefCell::new(None),
+        state,
+        main_view: SettingsMainView {
+            account: account_dropdown.clone(),
+            name: account_name_row.clone(),
+            aliases: alias_list.clone(),
+            edit: edit_alias_button.clone(),
+            remove: remove_alias_button.clone(),
+            set_default: default_alias_button.clone(),
+            projecting: Cell::new(false),
+        },
+        editor_view: AliasEditorView {
+            page: editor_navigation_page,
+            name: name_row,
+            address: address_row.clone(),
+            reply_to: reply_to_row,
+            composer: signature_composer,
+            text: signature_text_editor,
+            stack: signature_stack,
+        },
+    });
+    let initial = settings.state.borrow().view_snapshot();
+    settings.main_view.refresh(&initial);
 
-    let state_for_name = Rc::clone(&state);
-    let view_for_name = main_view.clone();
-    let dropdown_for_name = account_dropdown.clone();
+    let session = Rc::downgrade(&settings);
     account_name_row.connect_changed(move |row| {
-        if view_for_name.is_projecting() {
+        let Some(settings) = session.upgrade() else {
+            return;
+        };
+        if settings.main_view.is_projecting() {
             return;
         }
         let name = row.text().to_string();
-        let mut state = state_for_name.borrow_mut();
-        let Some(selected) = state.rename_selected(name.clone()) else {
-            return;
-        };
-        drop(state);
-        if let Some(names) = dropdown_for_name.model()
-            .and_then(|model| model.downcast::<gtk::StringList>().ok())
+        let selected = settings.state.borrow_mut().rename_selected(name.clone());
+        if let Some(selected) = selected
+            && let Some(names) = settings.main_view.account.model()
+                .and_then(|model| model.downcast::<gtk::StringList>().ok())
         {
             names.splice(selected as u32, 1, &[&name]);
         }
     });
 
-    let composer = Rc::clone(&signature_composer);
-    let text = signature_text_editor.clone();
-    let stack = signature_stack.clone();
-    let nav = navigation.clone();
-    let toast = toast_overlay.clone();
+    let session = Rc::downgrade(&settings);
     convert_signature_button.connect_clicked(move |_| {
-        if stack.visible_child_name().as_deref() == Some("text") {
-            let buffer = text.buffer();
-            let value = buffer
-                .text(&buffer.start_iter(), &buffer.end_iter(), true)
-                .to_string();
-            composer.set_content(
-                &crate::model::mail::plain_text_to_html(&value),
-                &value,
-            );
-            stack.set_visible_child_name("html");
+        let Some(settings) = session.upgrade() else {
+            return;
+        };
+        let editor = &settings.editor_view;
+        if editor.stack.visible_child_name().as_deref() == Some("text") {
+            let text = editor.signature_text();
+            editor.composer.set_content(&crate::model::mail::plain_text_to_html(&text), &text);
+            editor.stack.set_visible_child_name("html");
         } else {
-            nav.set_sensitive(false);
-            let nav = nav.clone();
-            let text = text.clone();
-            let stack = stack.clone();
-            let toast = toast.clone();
-            composer.capture_content(move |content| {
-                nav.set_sensitive(true);
+            settings.navigation.set_sensitive(false);
+            let session = session.clone();
+            editor.composer.capture_content(move |content| {
+                let Some(settings) = session.upgrade() else {
+                    return;
+                };
                 match content {
                     Ok(content) => {
-                        text.buffer().set_text(&content.text);
-                        stack.set_visible_child_name("text");
+                        let editor = &settings.editor_view;
+                        editor.text.buffer().set_text(&content.text);
+                        editor.stack.set_visible_child_name("text");
                     }
                     Err(()) => {
-                        toast.add_toast(adw::Toast::new(&gettext("Signature not converted.")));
+                        settings.toast.add_toast(adw::Toast::new(
+                            &gettext("Signature not converted."),
+                        ));
                     }
                 }
+                settings.navigation.set_sensitive(true);
             });
         }
     });
 
-    let state_for_account = Rc::clone(&state);
-    let view_for_account = main_view.clone();
+    let session = Rc::downgrade(&settings);
     account_dropdown.connect_selected_notify(move |dropdown| {
-        if view_for_account.is_projecting() {
+        let Some(settings) = session.upgrade() else {
+            return;
+        };
+        if settings.main_view.is_projecting() {
             return;
         }
-        let selected = dropdown.selected() as usize;
-        let mut state = state_for_account.borrow_mut();
-        if !state.select_account(selected) {
+        let mut state = settings.state.borrow_mut();
+        if !state.select_account(dropdown.selected() as usize) {
             return;
         }
         let snapshot = state.view_snapshot();
         drop(state);
-        view_for_account.show_account(&snapshot);
+        settings.main_view.show_account(&snapshot);
     });
 
-    let state_for_selection = Rc::clone(&state);
-    let view_for_selection = main_view.clone();
+    let session = Rc::downgrade(&settings);
     alias_list.connect_row_selected(move |_, row| {
-        if view_for_selection.is_projecting() {
+        let Some(settings) = session.upgrade() else {
+            return;
+        };
+        if settings.main_view.is_projecting() {
             return;
         }
-        let mut state = state_for_selection.borrow_mut();
+        let mut state = settings.state.borrow_mut();
         state.select_identity(row.map(|row| row.index() as usize));
         let snapshot = state.view_snapshot();
         drop(state);
-        view_for_selection.update_actions(&snapshot);
+        settings.main_view.update_actions(&snapshot);
     });
 
-    let state_for_edit = Rc::clone(&state);
-    let nav_for_edit = navigation.clone();
-    let editor_for_edit = editor_view.clone();
+    let session = Rc::downgrade(&settings);
     edit_alias_button.connect_clicked(move |_| {
-        let Some((account, identity)) = state_for_edit.borrow_mut().begin_edit() else {
+        let Some(settings) = session.upgrade() else {
             return;
         };
-        editor_for_edit.load(&account, &identity);
-        editor_for_edit.page.set_title(&gettext("Edit Alias"));
-        nav_for_edit.push_by_tag("editor");
+        let Some((account, identity)) = settings.state.borrow_mut().begin_edit() else {
+            return;
+        };
+        let editor = &settings.editor_view;
+        editor.load(&account, &identity);
+        editor.page.set_title(&gettext("Edit Alias"));
+        settings.navigation.push_by_tag("editor");
     });
 
-    let state_for_add = Rc::clone(&state);
-    let nav_for_add = navigation.clone();
-    let editor_for_add = editor_view.clone();
+    let session = Rc::downgrade(&settings);
     add_alias_button.connect_clicked(move |_| {
-        let started = state_for_add.borrow_mut().begin_add();
-        if !started {
+        let Some(settings) = session.upgrade() else {
+            return;
+        };
+        if !settings.state.borrow_mut().begin_add() {
             return;
         }
-        editor_for_add.clear();
-        editor_for_add.page.set_title(&gettext("Add Alias"));
-        nav_for_add.push_by_tag("editor");
-        editor_for_add.name.grab_focus();
+        let editor = &settings.editor_view;
+        editor.clear();
+        editor.page.set_title(&gettext("Add Alias"));
+        settings.navigation.push_by_tag("editor");
+        editor.name.grab_focus();
     });
     let apply_for_validation = apply_alias_button.clone();
     address_row.connect_changed(move |row| {
         apply_for_validation.set_sensitive(!row.text().trim().is_empty());
     });
 
-    let state_for_apply = Rc::clone(&state);
-    let view_for_apply = main_view.clone();
-    let editor_for_apply = editor_view.clone();
-    let nav_for_apply = navigation.clone();
-    let toast_for_apply = toast_overlay.clone();
+    let session = Rc::downgrade(&settings);
     apply_alias_button.connect_clicked(move |_| {
-        let username = editor_for_apply.name.text().to_string();
-        let address = editor_for_apply.address.text().to_string();
-        let reply = Some(editor_for_apply.reply_to.text().to_string());
-        let signature_text = {
-            let buffer = editor_for_apply.text.buffer();
-            buffer
-                .text(&buffer.start_iter(), &buffer.end_iter(), true)
-                .to_string()
-        };
-        let Some(target) = state_for_apply.borrow().editor_target() else {
+        let Some(settings) = session.upgrade() else {
             return;
         };
-        let state = Rc::clone(&state_for_apply);
-        let view = view_for_apply.clone();
-        let nav = nav_for_apply.clone();
-        let toast = toast_for_apply.clone();
-        nav_for_apply.set_sensitive(false);
-        editor_for_apply.composer.capture_content(move |content| {
-            nav.set_sensitive(true);
-            let Ok(content) = content else {
-                toast.add_toast(adw::Toast::new(&gettext("Alias not changed.")));
+        let Some(target) = settings.state.borrow().editor_target() else {
+            return;
+        };
+        let editor = &settings.editor_view;
+        let name = editor.name.text().to_string();
+        let address = editor.address.text().to_string();
+        let reply_to = Some(editor.reply_to.text().to_string());
+        let text = editor.signature_text();
+        let session = session.clone();
+        settings.navigation.set_sensitive(false);
+        editor.composer.capture_content(move |content| {
+            let Some(settings) = session.upgrade() else {
                 return;
             };
-            let identity = SendingIdentity::new(
-                address,
-                username,
-                reply,
-                Signature {
-                    html: content.html,
-                    text: signature_text,
-                },
-            );
-            let mut state = state.borrow_mut();
-            if !state.apply_editor(&target, identity) {
-                drop(state);
-                toast.add_toast(adw::Toast::new(&gettext("Alias not changed.")));
-                return;
+            let applied = content.is_ok_and(|content| {
+                let identity = SendingIdentity::new(
+                    address,
+                    name,
+                    reply_to,
+                    Signature { html: content.html, text },
+                );
+                settings.state.borrow_mut().apply_editor(&target, identity)
+            });
+            settings.navigation.set_sensitive(true);
+            if applied {
+                let snapshot = settings.state.borrow().view_snapshot();
+                settings.main_view.show_account(&snapshot);
+                settings.navigation.pop();
+            } else {
+                settings.toast.add_toast(adw::Toast::new(&gettext("Alias not changed.")));
             }
-            let snapshot = state.view_snapshot();
-            drop(state);
-            view.show_account(&snapshot);
-            nav.pop();
         });
     });
 
-    let state_for_remove = Rc::clone(&state);
-    let view_for_remove = main_view.clone();
+    let session = Rc::downgrade(&settings);
     remove_alias_button.connect_clicked(move |_| {
-        let mut state = state_for_remove.borrow_mut();
+        let Some(settings) = session.upgrade() else {
+            return;
+        };
+        let mut state = settings.state.borrow_mut();
         if !state.remove_selected_identity() {
             return;
         }
         let snapshot = state.view_snapshot();
         drop(state);
-        view_for_remove.show_account(&snapshot);
+        settings.main_view.show_account(&snapshot);
     });
 
-    let state_for_default = Rc::clone(&state);
-    let view_for_default = main_view.clone();
+    let session = Rc::downgrade(&settings);
     default_alias_button.connect_clicked(move |_| {
-        let mut state = state_for_default.borrow_mut();
+        let Some(settings) = session.upgrade() else {
+            return;
+        };
+        let mut state = settings.state.borrow_mut();
         if !state.set_selected_default() {
             return;
         }
         let snapshot = state.view_snapshot();
         drop(state);
-        view_for_default.show_account(&snapshot);
+        settings.main_view.show_account(&snapshot);
     });
 
-    let state_for_save = Rc::clone(&state);
-    let saves_for_save = saves.clone();
-    let coordinator_for_save = coordinator.clone();
-    let nav_for_save = navigation.clone();
-    let toast_for_save = toast_overlay.clone();
-    let dialog_for_save = dialog.clone();
+    let session = Rc::downgrade(&settings);
     save_button.connect_clicked(move |_| {
-        let accounts = state_for_save.borrow().accounts_to_save();
-        let Some(accounts) = accounts else {
-            toast_for_save.add_toast(adw::Toast::new(&gettext("Account name is empty.")));
-            return;
-        };
-        dialog_for_save.set_can_close(false);
-        nav_for_save.set_sensitive(false);
-        let nav = nav_for_save.clone();
-        let toast = toast_for_save.clone();
-        let state = Rc::clone(&state_for_save);
-        let dialog = dialog_for_save.clone();
-        let submitted = accounts.clone();
-        saves_for_save.request(&coordinator_for_save, accounts, move |result| {
-            dialog.set_can_close(true);
-            nav.set_sensitive(true);
-            match result {
-                Ok(()) => {
-                    state.borrow_mut().record_saved(submitted);
-                }
-                Err(message) => {
-                    toast.add_toast(adw::Toast::new(&message));
-                }
-            }
-        });
-    });
-
-    let state_for_pop = Rc::clone(&state);
-    navigation.connect_popped(move |_, page| {
-        if page.tag().as_deref() == Some("editor") {
-            state_for_pop.borrow_mut().finish_editor();
+        if let Some(settings) = session.upgrade() {
+            settings.save(&coordinator);
         }
     });
 
-    SettingsDialog {
-        inner: dialog,
-        saves,
-        mailbox: mailbox_state,
-        state,
-        main_view,
-        editor_view,
-    }
+    let session = Rc::downgrade(&settings);
+    navigation.connect_popped(move |_, page| {
+        if page.tag().as_deref() == Some("editor")
+            && let Some(settings) = session.upgrade()
+        {
+            settings.state.borrow_mut().finish_editor();
+        }
+    });
+
+    settings
 }
 
 fn rebuild_alias_list(list: &gtk::ListBox, account: Option<&MailAccount>) {
@@ -645,6 +602,7 @@ fn rebuild_alias_list(list: &gtk::ListBox, account: Option<&MailAccount>) {
     };
     for identity in account.aliases() {
         let row = adw::ActionRow::builder()
+            .use_markup(false)
             .title(identity.display_name_or_address())
             .build();
         if !identity.display_name.is_empty() {

@@ -64,15 +64,17 @@ impl DualFormatEditor {
         let frame = editor_frame(label, &formatting_scroller, &stack);
 
         let formatting_for_mode = formatting_scroller.clone();
-        let convert_for_mode = convert_button.clone();
+        let convert_for_mode = convert_button.downgrade();
         stack.connect_visible_child_name_notify(move |stack| {
             let html_active = stack.visible_child_name().as_deref() == Some("html");
             formatting_for_mode.set_visible(html_active);
-            convert_for_mode.set_icon_name(if html_active {
-                "format-text-plaintext-symbolic"
-            } else {
-                "format-text-rich-symbolic"
-            });
+            if let Some(convert) = convert_for_mode.upgrade() {
+                convert.set_icon_name(if html_active {
+                    "format-text-plaintext-symbolic"
+                } else {
+                    "format-text-rich-symbolic"
+                });
+            }
         });
 
         Self {

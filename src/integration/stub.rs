@@ -174,8 +174,8 @@ impl MailBackend for StubBackend {
         Ok(super::backend::slice_conversations(&conversations, offset, limit))
     }
 
-    fn fill_message_cache(&self, conversation_id: &ConversationId) -> anyhow::Result<bool> {
-        Ok(self.conversation_exists(conversation_id))
+    fn fill_message_cache(&self, _conversation_id: &ConversationId) -> anyhow::Result<()> {
+        Ok(())
     }
 
     fn get_cached_message_detail(
@@ -199,7 +199,7 @@ impl MailBackend for StubBackend {
         Ok(matches)
     }
 
-    fn refresh(&self) -> anyhow::Result<RefreshOutcome> {
+    fn refresh(&self, _cache_changed: &dyn Fn()) -> anyhow::Result<RefreshOutcome> {
         Ok(RefreshOutcome::default())
     }
 
@@ -390,8 +390,11 @@ mod tests {
         let unknown = ConversationId("absent-message".into());
         let before = backend.store.conversations(&FolderId("inbox".into()));
 
-        assert!(backend.fill_message_cache(&known).unwrap());
-        assert!(!backend.fill_message_cache(&unknown).unwrap());
+        backend.fill_message_cache(&known).unwrap();
+        backend.fill_message_cache(&unknown).unwrap();
+        assert!(backend.get_cached_message_detail(&known)
+            .unwrap()
+            .is_some());
         assert!(backend.get_cached_message_detail(&unknown)
             .unwrap()
             .is_none());

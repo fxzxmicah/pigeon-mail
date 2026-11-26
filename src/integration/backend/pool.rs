@@ -182,7 +182,7 @@ mod tests {
             crate::model::mail::MailboxMode::NoAccount
         );
         assert!(activated.backend.open_change_monitor(Arc::new(|| {})).is_ok());
-        activated.backend.refresh().unwrap();
+        activated.backend.refresh(&|| {}).unwrap();
 
         let folders = activated.backend.list_folders().unwrap();
         assert!(!folders.is_empty());

@@ -1,3 +1,4 @@
+use crate::integration::account::AccountCatalog;
 use crate::integration::backend::{SharedMailBackendRouter, mail_backend_router};
 use crate::integration::settings::SettingsStore;
 use crate::integration::stub::stub_account;
@@ -64,9 +65,10 @@ impl AccountRuntime {
 
     pub fn initial_catalog(&self) -> AccountBootstrap {
         let settings = self.settings_store.load();
-        match self.seed_for_settings(settings.clone()) {
-            Ok(seed) => {
-                AccountBootstrap::Ready(seed)
+        match crate::integration::account::discover() {
+            Ok(catalog) => {
+                let (accounts, _) = self.install_catalog(catalog);
+                AccountBootstrap::Ready(Self::seed_from_accounts(settings, accounts))
             }
             Err(error) => {
                 AccountBootstrap::Unavailable {
@@ -85,19 +87,19 @@ impl AccountRuntime {
         }
     }
 
-    fn seed_for_settings(&self, settings: AppSettings) -> anyhow::Result<MailboxSeed> {
-        let (accounts, bindings) = crate::integration::account::discover()?.into_parts();
-        Ok(self.seed_from_accounts(settings, accounts, bindings))
-    }
-
     pub(crate) fn apply_discovered_catalog(
         &self,
         input: RediscoveryInput,
-        catalog: crate::integration::account::AccountCatalog,
+        catalog: AccountCatalog,
     ) -> AccountRediscovery {
+        let (accounts, changed_routes) = self.install_catalog(catalog);
+        self.reconcile_catalog(input, accounts, changed_routes)
+    }
+
+    fn install_catalog(&self, catalog: AccountCatalog) -> (Vec<MailAccount>, Vec<MailAccountId>) {
         let (accounts, bindings) = catalog.into_parts();
         let changed_routes = self.backend_router.update_binding_catalog(&bindings);
-        self.reconcile_catalog(input, accounts, changed_routes)
+        (accounts, changed_routes)
     }
 
     fn reconcile_catalog(
@@ -134,36 +136,21 @@ impl AccountRuntime {
                 .map(|account| account.id.clone());
         }
         AccountRediscovery::Replacement {
-            seed: self.seed_from_installed_accounts(settings, accounts),
+            seed: Self::seed_from_accounts(settings, accounts),
         }
     }
 
-    fn seed_from_accounts(
-        &self,
-        settings: AppSettings,
-        accounts: Vec<MailAccount>,
-        bindings: Vec<crate::integration::account::EdsAccountBinding>,
-    ) -> MailboxSeed {
-        self.backend_router.update_binding_catalog(&bindings);
-        self.seed_from_installed_accounts(settings, accounts)
-    }
-
-    fn seed_from_installed_accounts(
-        &self,
-        mut settings: AppSettings,
-        accounts: Vec<MailAccount>,
-    ) -> MailboxSeed {
-        let selected_account_id = settings
+    fn seed_from_accounts(mut settings: AppSettings, accounts: Vec<MailAccount>) -> MailboxSeed {
+        settings.selected_account_id = settings
             .selected_account_id
             .as_ref()
             .and_then(|selected| accounts.iter().find(|account| account.id == *selected))
             .or_else(|| accounts.first())
             .map(|account| account.id.clone());
-        settings.selected_account_id = selected_account_id.clone();
-        let accounts = if selected_account_id.is_some() {
-            accounts
-        } else {
+        let accounts = if accounts.is_empty() {
             vec![stub_account()]
+        } else {
+            accounts
         };
         MailboxSeed {
             accounts,

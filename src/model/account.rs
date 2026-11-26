@@ -14,6 +14,12 @@ pub struct MailAccount {
     default_address: String,
 }
 
+#[derive(Clone)]
+pub(crate) struct AccountIdentityEdit {
+    pub(crate) baseline: MailAccount,
+    pub(crate) desired: MailAccount,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SendingIdentity {
     pub address: String,

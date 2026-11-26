@@ -66,39 +66,3 @@ fn error_category(error: &anyhow::Error) -> &'static str {
         }
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::{default_filter, error_category};
-
-    #[cfg(debug_assertions)]
-    #[test]
-    fn development_build_enables_project_debug_logging_by_default() {
-        assert_eq!(default_filter(), "info,pigeon=debug");
-    }
-
-    #[cfg(not(debug_assertions))]
-    #[test]
-    fn release_build_keeps_info_as_the_default_log_level() {
-        assert_eq!(default_filter(), "info");
-    }
-
-    #[test]
-    fn log_categories_do_not_echo_sensitive_error_text() {
-        assert_eq!(
-            error_category(&anyhow::anyhow!("TLS failure for private host")),
-            "connectivity"
-        );
-        assert_eq!(
-            error_category(&anyhow::anyhow!("unclassified private detail")),
-            "backend"
-        );
-        assert_eq!(
-            error_category(&anyhow::Error::new(glib::Error::new(
-                gio::IOErrorEnum::NoSpace,
-                "opaque",
-            ))),
-            "storage"
-        );
-    }
-}

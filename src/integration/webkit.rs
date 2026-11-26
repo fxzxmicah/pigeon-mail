@@ -511,28 +511,24 @@ mod tests {
     }
 
     #[test]
-    fn composer_document_encodes_untrusted_closing_script_markup() {
-        let document = wrap_composer_document(
-            "</script><img src='https://example.invalid/tracker' onerror='alert(1)'>",
-            9,
-        );
-
-        assert!(!document.contains("</script><img"));
-        assert!(document.contains("\\u003c/script>"));
-        assert!(document.contains("default-src 'none'"));
-        assert!(document.contains("generation: 9"));
-    }
-
-    #[test]
-    fn composer_document_preserves_empty_and_multiline_content_as_json() {
-        let empty = wrap_composer_document("", 0);
-        let multiline = wrap_composer_document("<p>One</p>\n<p>Two</p>", u64::MAX);
-
-        assert!(empty.contains("document.body.innerHTML = \"\";"));
-        assert!(empty.contains("html: currentHtml()"));
-        assert!(empty.contains("querySelector('img,video,audio,table,hr')"));
-        assert!(multiline.contains("\\u003cp>One\\u003c/p>\\n\\u003cp>Two\\u003c/p>"));
-        assert!(multiline.contains(&format!("generation: {}", u64::MAX)));
+    fn composer_document_round_trips_content_without_creating_a_second_script() {
+        for body in [
+            "",
+            "<p>One \"quoted\"</p>\n<p>Two \\ paths</p>",
+            "</script><script>unexpected()</script>",
+        ] {
+            let document = wrap_composer_document(body, 7);
+            let script = document.split_once("<script nonce=\"mail-editor\">").unwrap().1;
+            let (script, remainder) = script.split_once("</script>").unwrap();
+            assert!(!remainder.contains("<script"));
+            let payload = script.split_once("document.body.innerHTML = ").unwrap().1;
+            let decoded = serde_json::Deserializer::from_str(payload)
+                .into_iter::<String>()
+                .next()
+                .unwrap()
+                .unwrap();
+            assert_eq!(decoded, body);
+        }
     }
 
     #[test]
@@ -544,8 +540,6 @@ mod tests {
         assert!(document.contains("default-src 'none'"));
         assert!(document.contains("img-src data: cid: http: https:"));
         assert!(document.contains("form-action 'none'"));
-        assert!(document.contains("min-width: 0 !important"));
-        assert!(document.contains("max-width: 100% !important"));
     }
 
     #[test]

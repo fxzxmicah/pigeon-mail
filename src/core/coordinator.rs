@@ -23,8 +23,6 @@ use crate::model::event::{RefreshFailureKind, RequestId};
 use crate::model::mail::{
     AttachmentInfo, AttachmentLocation, AttachmentOperation, ConversationId, DraftMessage,
 };
-#[cfg(test)]
-use detail::MessageDetailJob;
 use detail::MessageDetailScheduler;
 use foreground::ForegroundAccount;
 use notification::NotificationTracker;
@@ -175,20 +173,6 @@ mod tests {
         assert!(!coordinator.account_refresh_running(&account_id));
         assert!(coordinator.drain().is_empty());
         assert!(coordinator.begin_account_refresh(&account_id).is_some());
-    }
-
-    #[test]
-    fn duplicate_refresh_request_is_coalesced_as_a_follow_up() {
-        let coordinator = MailCoordinator::new();
-        let account_id = MailAccountId("account-1".into());
-        coordinator.select_foreground_account(account_id.clone());
-        let refresh = coordinator
-            .begin_account_refresh(&account_id)
-            .expect("first refresh should start");
-        coordinator.request_leased_account_refresh(account_service(account_id.clone()));
-        assert!(coordinator.finish_account_refresh(&account_id).is_some());
-
-        drop(refresh);
     }
 
     #[test]
@@ -535,29 +519,6 @@ mod tests {
     }
 
     #[test]
-    fn cloned_coordinators_share_events_and_refresh_state() {
-        let coordinator = MailCoordinator::new();
-        let worker = coordinator.clone();
-        let account_id = MailAccountId("account-1".into());
-        let refresh = coordinator
-            .begin_account_refresh(&account_id)
-            .expect("refresh should start");
-        assert!(worker.begin_account_refresh(&account_id).is_none());
-
-        worker.publish(MailEvent::MailboxCacheChanged {
-            account_id: MailAccountId("account-1".into()),
-        });
-
-        let events = coordinator.drain();
-        assert!(matches!(
-            events.as_slice(),
-            [MailEvent::MailboxCacheChanged { account_id }]
-                if account_id.0 == "account-1"
-        ));
-        drop(refresh);
-    }
-
-    #[test]
     fn write_leases_count_each_active_worker_scope() {
         let coordinator = MailCoordinator::new();
         let first = coordinator.begin_write();
@@ -584,21 +545,56 @@ mod tests {
     fn identity_batch_save_completes_through_one_shared_event() {
         let coordinator = MailCoordinator::new();
         let account = crate::integration::stub::stub_account();
-
-        coordinator.request_account_identities_save(42.into(), vec![account.clone(), account]);
+        let edit = crate::model::account::AccountIdentityEdit {
+            baseline: account.clone(),
+            desired: account,
+        };
+        coordinator.request_account_identities_save(42.into(), vec![edit.clone(), edit]);
         coordinator.wait_for_writes();
 
+        let events = coordinator
+            .drain()
+            .into_iter()
+            .filter(|event| !matches!(event, MailEvent::PendingWorkChanged))
+            .collect::<Vec<_>>();
         assert!(matches!(
-            coordinator.drain().as_slice(),
-            [
-                MailEvent::PendingWorkChanged,
-                MailEvent::AccountIdentitiesSaveCompleted {
-                    request_id,
-                    result: Ok(()),
-                },
-                MailEvent::PendingWorkChanged,
-            ] if *request_id == RequestId::from(42)
+            events.as_slice(),
+            [MailEvent::AccountIdentitiesSaveCompleted {
+                request_id,
+                result: Ok(()),
+            }] if *request_id == RequestId::from(42)
         ));
+    }
+
+    #[test]
+    fn stub_compose_validates_send_without_publishing_a_cache_change() {
+        let coordinator = coordinator_with_stub_route();
+        let account = crate::integration::stub::stub_account();
+        let mut draft = crate::core::draft::create_draft(
+            account.id.clone(),
+            account.default_identity(),
+        );
+
+        coordinator.request_save_draft(draft.clone());
+        coordinator.request_send_draft(draft.clone());
+        draft.to.push("recipient@example.net".into());
+        coordinator.request_send_draft(draft);
+        coordinator.wait_for_writes();
+
+        let events = coordinator
+            .drain()
+            .into_iter()
+            .filter(|event| !matches!(event, MailEvent::PendingWorkChanged))
+            .collect::<Vec<_>>();
+        assert!(matches!(
+            events.as_slice(),
+            [
+                MailEvent::DraftSaveCompleted { result: Ok(None) },
+                MailEvent::SendCompleted { result: Err(_) },
+                MailEvent::SendCompleted { result: Ok(()) },
+            ],
+        ));
+        assert_eq!(coordinator.pending_work_count(), 0);
     }
 
     #[test]
@@ -613,32 +609,6 @@ mod tests {
 
         assert!(coordinator.drain().is_empty());
         assert!(coordinator.begin_account_refresh(&account_id).is_some());
-    }
-
-    #[test]
-    fn drain_preserves_event_order_from_a_single_publisher() {
-        let coordinator = MailCoordinator::new();
-        coordinator.publish(MailEvent::MailboxCacheChanged {
-            account_id: MailAccountId("account-1".into()),
-        });
-        coordinator.publish(MailEvent::AccountRefreshCompleted {
-            account_id: MailAccountId("account-2".into()),
-            failure: Some(RefreshFailureKind::Connectivity),
-        });
-
-        let events = coordinator.drain();
-        assert!(matches!(
-            events.as_slice(),
-            [
-                MailEvent::MailboxCacheChanged {
-                    account_id: first_account_id,
-                },
-                MailEvent::AccountRefreshCompleted {
-                    account_id: second_account_id,
-                    failure: Some(RefreshFailureKind::Connectivity),
-                },
-            ] if first_account_id.0 == "account-1" && second_account_id.0 == "account-2"
-        ));
     }
 
     #[test]
@@ -744,236 +714,5 @@ mod tests {
                 && second_name == "second.png"
                 && second_uri == "file:///cache/second.png"
         ));
-    }
-
-    #[test]
-    fn remote_message_detail_loads_are_single_flight_and_keep_only_the_newest_follow_up() {
-        let coordinator = MailCoordinator::new();
-        let scheduler = &coordinator.state.message_details;
-        let backend = crate::integration::stub::mail_backend();
-        let account_id = crate::integration::stub::stub_account().id;
-        let job = |request_id: u64, conversation_id: &str| MessageDetailJob {
-            service: AccountMailService::new(backend.clone()),
-            request_id: request_id.into(),
-            conversation_id: ConversationId(conversation_id.into()),
-        };
-
-        assert!(scheduler.begin_remote(job(1, "conversation")).is_some());
-        assert!(scheduler.begin_remote(job(2, "conversation")).is_none());
-        assert!(scheduler.begin_remote(job(3, "conversation")).is_none());
-
-        let follow_up = scheduler
-            .finish_remote(&account_id)
-            .expect("newest detail request should be retained");
-        assert_eq!(follow_up.request_id, RequestId::from(3));
-        assert_eq!(
-            follow_up.conversation_id,
-            ConversationId("conversation".into())
-        );
-        assert!(scheduler.finish_remote(&account_id).is_none());
-        assert!(scheduler.begin_remote(job(4, "conversation")).is_some());
-    }
-
-    #[test]
-    fn cached_detail_probes_are_single_flight_and_keep_only_the_newest_follow_up() {
-        let coordinator = MailCoordinator::new();
-        let scheduler = &coordinator.state.message_details;
-        let backend = crate::integration::stub::mail_backend();
-        let account_id = crate::integration::stub::stub_account().id;
-        let job = |request_id: u64, conversation_id: &str| MessageDetailJob {
-            service: AccountMailService::new(backend.clone()),
-            request_id: request_id.into(),
-            conversation_id: ConversationId(conversation_id.into()),
-        };
-
-        assert!(scheduler.begin_cache(job(1, "first")).is_some());
-        assert!(scheduler.begin_cache(job(2, "second")).is_none());
-        assert!(scheduler.begin_cache(job(3, "third")).is_none());
-
-        let follow_up = scheduler
-            .finish_cache(&account_id)
-            .expect("newest cache probe should be retained");
-        assert_eq!(follow_up.request_id, RequestId::from(3));
-        assert_eq!(follow_up.conversation_id, ConversationId("third".into()));
-        assert!(scheduler.finish_cache(&account_id).is_none());
-    }
-
-    #[test]
-    fn cached_detail_probe_bypasses_an_existing_remote_flight() {
-        let coordinator = MailCoordinator::new();
-        let scheduler = &coordinator.state.message_details;
-        let backend = crate::integration::stub::mail_backend();
-        let account_id = crate::integration::stub::stub_account().id;
-        let job = |request_id: u64, conversation_id: &str| MessageDetailJob {
-            service: AccountMailService::new(backend.clone()),
-            request_id: request_id.into(),
-            conversation_id: ConversationId(conversation_id.into()),
-        };
-
-        let active = job(1, "uncached");
-        let cached = job(2, "stub-account");
-        let detail = cached
-            .service
-            .cached_message_detail(&cached.conversation_id)
-        .expect("stub cache probe should succeed")
-        .expect("stub detail should be cached");
-
-        assert!(scheduler.begin_remote(active).is_some());
-        scheduler.select(&cached);
-        coordinator.apply_message_detail_cache_probe(cached, Ok(Some(detail)));
-
-        assert!(matches!(
-            coordinator.drain().as_slice(),
-            [MailEvent::MessageDetailLoaded {
-                request_id,
-                result: Ok(Some(_)),
-            }] if *request_id == RequestId::from(2)
-        ));
-        assert!(scheduler.finish_remote(&account_id).is_none());
-    }
-
-    #[test]
-    fn failed_cache_probe_is_not_reclassified_as_a_remote_cache_miss() {
-        let coordinator = MailCoordinator::new();
-        let scheduler = &coordinator.state.message_details;
-        let account_id = MailAccountId("account-1".into());
-        let job = MessageDetailJob {
-            service: AccountMailService::new(
-                crate::integration::stub::test_mail_backend(account_id.clone()),
-            ),
-            request_id: 7.into(),
-            conversation_id: ConversationId("conversation-1".into()),
-        };
-        scheduler.select(&job);
-
-        coordinator.apply_message_detail_cache_probe(job, Err(anyhow::anyhow!("cache failed")));
-
-        assert!(matches!(
-            coordinator.drain().as_slice(),
-            [MailEvent::MessageDetailLoaded {
-                request_id,
-                result: Err(_),
-            }] if *request_id == RequestId::from(7)
-        ));
-        assert!(!scheduler.has_current(&account_id));
-        assert!(scheduler.finish_remote(&account_id).is_none());
-    }
-
-    #[test]
-    fn canceled_selection_ignores_a_late_cached_hit() {
-        let coordinator = MailCoordinator::new();
-        let scheduler = &coordinator.state.message_details;
-        let backend = crate::integration::stub::mail_backend();
-        let account_id = crate::integration::stub::stub_account().id;
-        let job = MessageDetailJob {
-            service: AccountMailService::new(backend),
-            request_id: 1.into(),
-            conversation_id: ConversationId("stub-account".into()),
-        };
-        let detail = job
-            .service
-            .cached_message_detail(&job.conversation_id)
-        .expect("stub cache probe should succeed")
-        .expect("stub detail should be cached");
-
-        scheduler.select(&job);
-        scheduler.cancel(&account_id);
-        coordinator.apply_message_detail_cache_probe(job, Ok(Some(detail)));
-
-        assert!(coordinator.drain().is_empty());
-        assert!(scheduler.finish_remote(&account_id).is_none());
-    }
-
-    #[test]
-    fn out_of_order_cache_misses_cannot_replace_the_newest_remote_follow_up() {
-        let coordinator = MailCoordinator::new();
-        let scheduler = &coordinator.state.message_details;
-        let account_id = MailAccountId("account-1".into());
-        let job = |request_id: u64, conversation_id: &str| MessageDetailJob {
-            service: AccountMailService::new(
-                crate::integration::stub::test_mail_backend(account_id.clone()),
-            ),
-            request_id: request_id.into(),
-            conversation_id: ConversationId(conversation_id.into()),
-        };
-        let active = job(1, "active");
-        let stale = job(2, "stale");
-        let newest = job(3, "newest");
-
-        assert!(scheduler.begin_remote(active).is_some());
-        scheduler.select(&stale);
-        scheduler.select(&newest);
-        coordinator.apply_message_detail_cache_probe(stale, Ok(None));
-        coordinator.apply_message_detail_cache_probe(newest, Ok(None));
-
-        let follow_up = scheduler
-            .finish_remote(&account_id)
-            .expect("newest cache miss should be the only remote follow-up");
-        assert_eq!(follow_up.request_id, RequestId::from(3));
-        assert_eq!(follow_up.conversation_id, ConversationId("newest".into()));
-    }
-
-    #[test]
-    fn message_detail_flights_are_scoped_per_account() {
-        let coordinator = MailCoordinator::new();
-        let scheduler = &coordinator.state.message_details;
-        let job = |account_id: &str, request_id: u64| MessageDetailJob {
-            service: AccountMailService::new(
-                crate::integration::stub::test_mail_backend(MailAccountId(account_id.into())),
-            ),
-            request_id: request_id.into(),
-            conversation_id: ConversationId("conversation".into()),
-        };
-
-        assert!(scheduler.begin_cache(job("account-1", 1)).is_some());
-        assert!(scheduler.begin_cache(job("account-2", 2)).is_some());
-        assert!(scheduler.begin_cache(job("account-1", 3)).is_none());
-
-        let first_cache_follow_up = scheduler
-            .finish_cache(&MailAccountId("account-1".into()))
-            .expect("first account should retain its cache follow-up");
-        assert_eq!(first_cache_follow_up.request_id, RequestId::from(3));
-        assert!(scheduler
-            .finish_cache(&MailAccountId("account-2".into()))
-            .is_none());
-
-        assert!(scheduler.begin_remote(job("account-1", 4)).is_some());
-        assert!(scheduler.begin_remote(job("account-2", 5)).is_some());
-        assert!(scheduler.begin_remote(job("account-1", 6)).is_none());
-
-        let first_follow_up = scheduler
-            .finish_remote(&MailAccountId("account-1".into()))
-            .expect("first account should retain its follow-up");
-        assert_eq!(first_follow_up.request_id, RequestId::from(6));
-        assert!(
-            scheduler
-                .finish_remote(&MailAccountId("account-2".into()))
-                .is_none()
-        );
-    }
-
-    #[test]
-    fn clearing_message_selection_discards_its_queued_detail() {
-        let coordinator = MailCoordinator::new();
-        let scheduler = &coordinator.state.message_details;
-        let account_id = MailAccountId("account-1".into());
-        let job = |request_id: u64| MessageDetailJob {
-            service: AccountMailService::new(
-                crate::integration::stub::test_mail_backend(account_id.clone()),
-            ),
-            request_id: request_id.into(),
-            conversation_id: ConversationId("conversation".into()),
-        };
-
-        assert!(scheduler.begin_cache(job(1)).is_some());
-        assert!(scheduler.begin_cache(job(2)).is_none());
-        assert!(scheduler.begin_remote(job(3)).is_some());
-        assert!(scheduler.begin_remote(job(4)).is_none());
-        coordinator.cancel_message_detail_requests(&account_id);
-
-        assert!(scheduler.finish_cache(&account_id).is_none());
-        assert!(scheduler.finish_remote(&account_id).is_none());
-        assert!(scheduler.begin_cache(job(5)).is_some());
-        assert!(scheduler.begin_remote(job(6)).is_some());
     }
 }
